@@ -4,6 +4,7 @@ package main
 var supportedEventTypes = []string{
 	// Messages and Communication
 	"Message",
+	"MessageDeleted",
 	"UndecryptableMessage",
 	"Receipt",
 	"MediaRetry",
@@ -40,6 +41,8 @@ var supportedEventTypes = []string{
 
 	// Synchronization and State
 	"AppState",
+	"ChatArchive",
+	"ChatLock",
 	"AppStateSyncComplete",
 	"HistorySync",
 	"OfflineSyncCompleted",

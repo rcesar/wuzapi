@@ -16,6 +16,8 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-resty/resty/v2"
@@ -32,7 +34,6 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"golang.org/x/net/proxy"
-	"sync"
 )
 
 // db field declaration as *sqlx.DB
@@ -43,6 +44,7 @@ type MyClient struct {
 	token          string
 	db             *sqlx.DB
 	s              *server
+	regularLowSync atomic.Bool
 }
 
 // safeGo runs fn in a new goroutine with a defer recover so a panic inside
@@ -183,15 +185,11 @@ func sendToUserWebHookWithHmac(webhookurl string, path string, jsonData []byte, 
 		"instanceName": instance_name,
 	}
 
-	if len(jsonData) > 8192 {
-		log.Debug().
-			Str("userID", userID).
-			Str("instanceName", instance_name).
-			Int("jsonDataBytes", len(jsonData)).
-			Msg("Data being sent to webhook")
-	} else {
-		log.Debug().Interface("webhookData", data).Msg("Data being sent to webhook")
-	}
+	log.Debug().
+		Str("userID", userID).
+		Str("instanceName", instance_name).
+		Int("jsonDataBytes", len(jsonData)).
+		Msg("Data being sent to webhook")
 
 	if webhookurl != "" {
 		log.Info().Str("url", webhookurl).Msg("Calling user webhook")
@@ -243,7 +241,7 @@ func getUserWebhookUrl(token string) string {
 	webhookurl := ""
 	myuserinfo, found := userinfocache.Get(token)
 	if !found {
-		log.Warn().Str("token", token).Msg("Could not call webhook as there is no user for this token")
+		log.Warn().Msg("Could not call webhook because the user token is unknown")
 	} else {
 		webhookurl = myuserinfo.(Values).Get("Webhook")
 	}
@@ -354,7 +352,7 @@ func (s *server) connectOnStartup() {
 				hmacKeyEncrypted = base64.StdEncoding.EncodeToString(hmac_key)
 			}
 
-			log.Info().Str("token", token).Msg("Connect to Whatsapp on startup")
+			log.Info().Str("userID", txtid).Msg("Connect to Whatsapp on startup")
 			v := Values{map[string]string{
 				"Id":               txtid,
 				"Name":             name,
@@ -642,6 +640,7 @@ func (s *server) startClient(userID string, textjid string, token string, kill c
 		db:             s.db,
 		s:              s,
 	}
+	mycli.regularLowSync.Store(true)
 	mycli.eventHandlerID = mycli.WAClient.AddEventHandler(mycli.myEventHandler)
 
 	// Store the MyClient in clientManager
@@ -940,6 +939,9 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 
 	switch evt := rawEvt.(type) {
 	case *events.AppStateSyncComplete:
+		if evt.Name == appstate.WAPatchRegularLow {
+			mycli.regularLowSync.Store(false)
+		}
 		if len(mycli.WAClient.Store.PushName) > 0 && evt.Name == appstate.WAPatchCriticalBlock {
 			err := mycli.WAClient.SendPresence(context.Background(), types.PresenceAvailable)
 			if err != nil {
@@ -979,7 +981,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			}
 		}
 	case *events.PairSuccess:
-		log.Info().Str("userid", mycli.userID).Str("token", mycli.token).Str("ID", evt.ID.String()).Str("BusinessName", evt.BusinessName).Str("Platform", evt.Platform).Msg("QR Pair Success")
+		log.Info().Str("userid", mycli.userID).Str("ID", evt.ID.String()).Str("BusinessName", evt.BusinessName).Str("Platform", evt.Platform).Msg("QR Pair Success")
 		jidStr := evt.ID.String()
 		if mycli.WAClient.Store != nil && mycli.WAClient.Store.ID != nil {
 			jidStr = mycli.WAClient.Store.ID.ToNonAD().String()
@@ -1002,7 +1004,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			token := myuserinfo.(Values).Get("Token")
 			v := updateUserInfo(myuserinfo, "Jid", jidStr)
 			userinfocache.Set(token, v, cache.NoExpiration)
-			log.Info().Str("jid", jidStr).Str("userid", txtid).Str("token", token).Msg("User information set")
+			log.Info().Str("jid", jidStr).Str("userid", txtid).Msg("User information set")
 		}
 
 		// Check if automatic history sync is enabled and trigger it after QR code is scanned
@@ -1176,24 +1178,24 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 				}
 			}
 		}
-    
-    if encMessage := evt.Message.GetSecretEncryptedMessage(); encMessage != nil {
-        decrypted, derr := mycli.WAClient.DecryptSecretEncryptedMessage(context.Background(), evt)
-        if derr != nil {
-            log.Warn().
-                Err(derr).
-                Str("messageID", evt.Info.ID).
-                Str("secretEncType", encMessage.GetSecretEncType().String()).
-                Msg("DecryptSecretEncryptedMessage failed")
-        } else if decrypted != nil {
-            log.Info().
-                Str("messageID", evt.Info.ID).
-                Str("secretEncType", encMessage.GetSecretEncType().String()).
-                Msg("Decrypted secretEncryptedMessage; swapping evt.Message")
-                evt.Message = decrypted
-        }
-    }
-    
+
+		if encMessage := evt.Message.GetSecretEncryptedMessage(); encMessage != nil {
+			decrypted, derr := mycli.WAClient.DecryptSecretEncryptedMessage(context.Background(), evt)
+			if derr != nil {
+				log.Warn().
+					Err(derr).
+					Str("messageID", evt.Info.ID).
+					Str("secretEncType", encMessage.GetSecretEncType().String()).
+					Msg("DecryptSecretEncryptedMessage failed")
+			} else if decrypted != nil {
+				log.Info().
+					Str("messageID", evt.Info.ID).
+					Str("secretEncType", encMessage.GetSecretEncType().String()).
+					Msg("Decrypted secretEncryptedMessage; swapping evt.Message")
+				evt.Message = decrypted
+			}
+		}
+
 		if !*skipMedia {
 
 			isIncoming := !evt.Info.IsFromMe
@@ -1384,6 +1386,10 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			} else {
 				log.Debug().Str("messageType", messageType).Str("messageID", evt.Info.ID).Msg("Skipping empty message from history")
 			}
+		}
+
+		if normalizedEvent, ok := watchdogEventPayload(evt); ok {
+			postmap = normalizedEvent
 		}
 
 	case *events.Receipt:
@@ -1691,8 +1697,18 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			}()
 		}
 
+	case *events.DeleteForMe, *events.Archive:
+		if normalizedEvent, ok := watchdogEventPayload(evt); ok {
+			postmap = normalizedEvent
+			dowebhook = 1
+		}
+		log.Info().Str("event", fmt.Sprintf("%T", evt)).Msg("App state mutation received")
 	case *events.AppState:
-		log.Info().Str("index", fmt.Sprintf("%+v", evt.Index)).Str("actionValue", fmt.Sprintf("%+v", evt.SyncActionValue)).Msg("App state event received")
+		if normalizedEvent, ok := watchdogEventPayload(evt, mycli.regularLowSync.Load()); ok {
+			postmap = normalizedEvent
+			dowebhook = 1
+		}
+		log.Info().Str("event", fmt.Sprintf("%T", evt)).Msg("App state mutation received")
 	case *events.LoggedOut:
 		postmap["type"] = "LoggedOut"
 		dowebhook = 1
