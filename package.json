@@ -1,0 +1,7 @@
+{
+  "name": "wuzapi",
+  "private": true,
+  "scripts": {
+    "dev": "docker compose up"
+  }
+}
