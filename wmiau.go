@@ -945,6 +945,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 	postmap["event"] = rawEvt
 	dowebhook := 0
 	path := ""
+	lookup := &clientMessageLookup{s: mycli.s, client: mycli, userID: mycli.userID}
 
 	switch evt := rawEvt.(type) {
 	case *events.AppStateSyncComplete:
@@ -1387,7 +1388,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			}
 		}
 
-		if normalizedEvent, ok := watchdogEventPayload(evt); ok {
+		if normalizedEvent, ok := watchdogEventPayload(evt, lookup); ok {
 			postmap = normalizedEvent
 		}
 
@@ -1697,13 +1698,13 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 		}
 
 	case *events.DeleteForMe, *events.Archive:
-		if normalizedEvent, ok := watchdogEventPayload(evt); ok {
+		if normalizedEvent, ok := watchdogEventPayload(evt, lookup); ok {
 			postmap = normalizedEvent
 			dowebhook = 1
 		}
 		log.Info().Str("event", fmt.Sprintf("%T", evt)).Msg("App state mutation received")
 	case *events.AppState:
-		if normalizedEvent, ok := watchdogEventPayload(evt, mycli.regularLowSync.Load()); ok {
+		if normalizedEvent, ok := watchdogEventPayload(evt, lookup, mycli.regularLowSync.Load()); ok {
 			postmap = normalizedEvent
 			dowebhook = 1
 		}
