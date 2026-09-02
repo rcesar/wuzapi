@@ -39,12 +39,16 @@ func watchdogEventPayload(rawEvent interface{}, lookup MessageLookup, initialSyn
 			actorPhoneNumber = lookup.MyPhoneNumber()
 		}
 
-		pushName := event.Info.PushName
-		if pushName == "" && lookup != nil && !event.Info.Sender.IsEmpty() {
-			pushName = lookup.LookupContact(event.Info.Sender.String())
+		actorPushName := event.Info.PushName
+		if event.Info.IsFromMe && lookup != nil && actorPushName == "" {
+			actorPushName = lookup.MyPushName()
+		}
+		if actorPushName == "" && lookup != nil && !event.Info.Sender.IsEmpty() {
+			actorPushName = lookup.LookupContact(event.Info.Sender.String())
 		}
 
 		senderPhoneNumber := ""
+		senderPushName := ""
 		messageContent := ""
 
 		if lookup != nil {
@@ -53,13 +57,10 @@ func watchdogEventPayload(rawEvent interface{}, lookup MessageLookup, initialSyn
 				messageContent = origText
 				if origSenderJID == "me" {
 					senderPhoneNumber = lookup.MyPhoneNumber()
+					senderPushName = lookup.MyPushName()
 				} else if origSenderJID != "" {
 					senderPhoneNumber = extractPhoneNumber(origSenderJID, lookup)
-					if pushName == "" || origSenderJID != event.Info.Sender.String() {
-						if origPush := lookup.LookupContact(origSenderJID); origPush != "" {
-							pushName = origPush
-						}
-					}
+					senderPushName = lookup.LookupContact(origSenderJID)
 				}
 			}
 		}
@@ -67,10 +68,18 @@ func watchdogEventPayload(rawEvent interface{}, lookup MessageLookup, initialSyn
 		if senderPhoneNumber == "" {
 			senderPhoneNumber = actorPhoneNumber
 		}
+		if senderPushName == "" {
+			senderPushName = actorPushName
+		}
 
 		phoneNumber := senderPhoneNumber
 		if phoneNumber == "" {
 			phoneNumber = actorPhoneNumber
+		}
+
+		pushName := senderPushName
+		if pushName == "" {
+			pushName = actorPushName
 		}
 
 		return watchdogPayload("MessageDeleted", map[string]interface{}{
@@ -83,7 +92,9 @@ func watchdogEventPayload(rawEvent interface{}, lookup MessageLookup, initialSyn
 			"actorCategory":     actorCategory,
 			"phoneNumber":       phoneNumber,
 			"senderPhoneNumber": senderPhoneNumber,
+			"senderPushName":    senderPushName,
 			"actorPhoneNumber":  actorPhoneNumber,
+			"actorPushName":     actorPushName,
 			"pushName":          pushName,
 			"messageContent":    messageContent,
 		}), true
@@ -98,12 +109,14 @@ func watchdogEventPayload(rawEvent interface{}, lookup MessageLookup, initialSyn
 
 		actorCategory := "company_account"
 		actorPhoneNumber := ""
+		actorPushName := ""
 		if lookup != nil {
 			actorPhoneNumber = lookup.MyPhoneNumber()
+			actorPushName = lookup.MyPushName()
 		}
 
 		senderPhoneNumber := ""
-		pushName := ""
+		senderPushName := ""
 		messageContent := ""
 
 		if lookup != nil {
@@ -112,9 +125,10 @@ func watchdogEventPayload(rawEvent interface{}, lookup MessageLookup, initialSyn
 				messageContent = origText
 				if origSenderJID == "me" {
 					senderPhoneNumber = lookup.MyPhoneNumber()
+					senderPushName = lookup.MyPushName()
 				} else if origSenderJID != "" {
 					senderPhoneNumber = extractPhoneNumber(origSenderJID, lookup)
-					pushName = lookup.LookupContact(origSenderJID)
+					senderPushName = lookup.LookupContact(origSenderJID)
 				}
 			}
 		}
@@ -130,18 +144,30 @@ func watchdogEventPayload(rawEvent interface{}, lookup MessageLookup, initialSyn
 			if senderPhoneNumber == "" {
 				senderPhoneNumber = senderJID.User
 			}
-			if pushName == "" && lookup != nil {
-				pushName = lookup.LookupContact(event.SenderJID.String())
+			if senderPushName == "" && lookup != nil {
+				senderPushName = lookup.LookupContact(event.SenderJID.String())
 			}
 		}
 
 		if senderPhoneNumber == "" && event.IsFromMe && lookup != nil {
 			senderPhoneNumber = lookup.MyPhoneNumber()
+			if senderPushName == "" {
+				senderPushName = lookup.MyPushName()
+			}
+		}
+
+		if senderPushName == "" && senderPhoneNumber == actorPhoneNumber {
+			senderPushName = actorPushName
 		}
 
 		phoneNumber := senderPhoneNumber
 		if phoneNumber == "" {
 			phoneNumber = actorPhoneNumber
+		}
+
+		pushName := senderPushName
+		if pushName == "" {
+			pushName = actorPushName
 		}
 
 		return watchdogPayload("MessageDeleted", map[string]interface{}{
@@ -155,7 +181,9 @@ func watchdogEventPayload(rawEvent interface{}, lookup MessageLookup, initialSyn
 			"fromFullSync":      event.FromFullSync,
 			"phoneNumber":       phoneNumber,
 			"senderPhoneNumber": senderPhoneNumber,
+			"senderPushName":    senderPushName,
 			"actorPhoneNumber":  actorPhoneNumber,
+			"actorPushName":     actorPushName,
 			"pushName":          pushName,
 			"messageContent":    messageContent,
 		}), true

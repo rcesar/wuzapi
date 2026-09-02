@@ -23,10 +23,11 @@ func mustJID(t *testing.T, value string) types.JID {
 }
 
 type mockLookup struct {
-	messages map[string]struct{ sender, text string }
-	contacts map[string]string
-	myPhone  string
-	lidMap   map[string]types.JID // LID string → resolved phone-number JID
+	messages   map[string]struct{ sender, text string }
+	contacts   map[string]string
+	myPhone    string
+	myPushName string
+	lidMap     map[string]types.JID // LID string → resolved phone-number JID
 }
 
 func (m *mockLookup) LookupMessage(chatJID, messageID string) (string, string, bool) {
@@ -55,6 +56,10 @@ func (m *mockLookup) LookupContact(jid string) string {
 
 func (m *mockLookup) MyPhoneNumber() string {
 	return m.myPhone
+}
+
+func (m *mockLookup) MyPushName() string {
+	return m.myPushName
 }
 
 func (m *mockLookup) ResolveLID(jid types.JID) types.JID {
@@ -119,6 +124,12 @@ func TestWatchdogEventPayload(t *testing.T) {
 		if event["pushName"] != "Actor Push" {
 			t.Fatalf("expected pushName 'Actor Push', got: %#v", event["pushName"])
 		}
+		if event["actorPushName"] != "Actor Push" {
+			t.Fatalf("expected actorPushName 'Actor Push', got: %#v", event["actorPushName"])
+		}
+		if event["senderPushName"] != "Actor Push" {
+			t.Fatalf("expected senderPushName 'Actor Push', got: %#v", event["senderPushName"])
+		}
 		if event["messageContent"] != "" {
 			t.Fatalf("expected empty messageContent without lookup, got: %#v", event["messageContent"])
 		}
@@ -146,8 +157,10 @@ func TestWatchdogEventPayload(t *testing.T) {
 			},
 			contacts: map[string]string{
 				"5511888888888@s.whatsapp.net": "Contato Original",
+				chat.String():                  "Chat Contact",
 			},
-			myPhone: "5511000000000",
+			myPhone:    "5511000000000",
+			myPushName: "My Account",
 		}
 
 		payload, ok := watchdogEventPayload(evt, mock)
@@ -161,8 +174,14 @@ func TestWatchdogEventPayload(t *testing.T) {
 		if event["senderPhoneNumber"] != "5511888888888" {
 			t.Fatalf("expected senderPhoneNumber '5511888888888', got: %#v", event["senderPhoneNumber"])
 		}
+		if event["senderPushName"] != "Contato Original" {
+			t.Fatalf("expected senderPushName 'Contato Original', got: %#v", event["senderPushName"])
+		}
 		if event["pushName"] != "Contato Original" {
 			t.Fatalf("expected pushName 'Contato Original', got: %#v", event["pushName"])
+		}
+		if event["actorPushName"] != "Chat Contact" {
+			t.Fatalf("expected actorPushName 'Chat Contact', got: %#v", event["actorPushName"])
 		}
 	})
 
@@ -177,7 +196,8 @@ func TestWatchdogEventPayload(t *testing.T) {
 			contacts: map[string]string{
 				"5511777777777@s.whatsapp.net": "Maria Silva",
 			},
-			myPhone: "5511000000000",
+			myPhone:    "5511000000000",
+			myPushName: "Vivva Admin",
 		}
 
 		payload, ok := watchdogEventPayload(&events.DeleteForMe{
@@ -196,8 +216,14 @@ func TestWatchdogEventPayload(t *testing.T) {
 		if event["senderPhoneNumber"] != "5511777777777" {
 			t.Fatalf("expected senderPhoneNumber '5511777777777', got: %#v", event["senderPhoneNumber"])
 		}
+		if event["senderPushName"] != "Maria Silva" {
+			t.Fatalf("expected senderPushName 'Maria Silva', got: %#v", event["senderPushName"])
+		}
 		if event["actorPhoneNumber"] != "5511000000000" {
 			t.Fatalf("expected actorPhoneNumber '5511000000000', got: %#v", event["actorPhoneNumber"])
+		}
+		if event["actorPushName"] != "Vivva Admin" {
+			t.Fatalf("expected actorPushName 'Vivva Admin', got: %#v", event["actorPushName"])
 		}
 		if event["pushName"] != "Maria Silva" {
 			t.Fatalf("expected pushName 'Maria Silva', got: %#v", event["pushName"])
@@ -273,7 +299,8 @@ func TestWatchdogEventPayload(t *testing.T) {
 			contacts: map[string]string{
 				"5511888888888@s.whatsapp.net": "Fulano da Silva",
 			},
-			myPhone: "5512996754791",
+			myPhone:    "5512996754791",
+			myPushName: "Vivva Laboratorio",
 			lidMap: map[string]types.JID{
 				lidJID.String(): resolvedJID,
 			},
@@ -288,6 +315,12 @@ func TestWatchdogEventPayload(t *testing.T) {
 		event := payload["event"].(map[string]interface{})
 		if event["senderPhoneNumber"] != "5511888888888" {
 			t.Fatalf("expected senderPhoneNumber '5511888888888', got: %#v", event["senderPhoneNumber"])
+		}
+		if event["senderPushName"] != "Fulano da Silva" {
+			t.Fatalf("expected senderPushName 'Fulano da Silva', got: %#v", event["senderPushName"])
+		}
+		if event["actorPushName"] != "Vivva Laboratorio" {
+			t.Fatalf("expected actorPushName 'Vivva Laboratorio', got: %#v", event["actorPushName"])
 		}
 		if event["phoneNumber"] != "5511888888888" {
 			t.Fatalf("expected phoneNumber '5511888888888', got: %#v", event["phoneNumber"])
@@ -320,7 +353,8 @@ func TestWatchdogEventPayload(t *testing.T) {
 			contacts: map[string]string{
 				"5511987654321@s.whatsapp.net": "Cliente Importante",
 			},
-			myPhone: "5512996754791",
+			myPhone:    "5512996754791",
+			myPushName: "Vivva Laboratorio",
 			lidMap: map[string]types.JID{
 				lidJID.String(): resolvedJID,
 			},
@@ -337,11 +371,20 @@ func TestWatchdogEventPayload(t *testing.T) {
 		if event["actorPhoneNumber"] != "5512996754791" {
 			t.Fatalf("expected actorPhoneNumber '5512996754791', got: %#v", event["actorPhoneNumber"])
 		}
+		if event["actorPushName"] != "Vivva Laboratorio" {
+			t.Fatalf("expected actorPushName 'Vivva Laboratorio', got: %#v", event["actorPushName"])
+		}
 		if event["senderPhoneNumber"] != "5512996754791" {
 			t.Fatalf("expected senderPhoneNumber '5512996754791', got: %#v", event["senderPhoneNumber"])
 		}
+		if event["senderPushName"] != "Vivva Laboratorio" {
+			t.Fatalf("expected senderPushName 'Vivva Laboratorio', got: %#v", event["senderPushName"])
+		}
 		if event["phoneNumber"] != "5512996754791" {
 			t.Fatalf("expected phoneNumber '5512996754791', got: %#v", event["phoneNumber"])
+		}
+		if event["pushName"] != "Vivva Laboratorio" {
+			t.Fatalf("expected pushName 'Vivva Laboratorio', got: %#v", event["pushName"])
 		}
 		// Interlocutor chat info clearly resolved
 		if event["chatPhoneNumber"] != "5511987654321" {

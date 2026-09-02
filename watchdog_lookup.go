@@ -19,6 +19,8 @@ type MessageLookup interface {
 	LookupContact(jidStr string) string
 	// MyPhoneNumber returns the account owner's phone number.
 	MyPhoneNumber() string
+	// MyPushName returns the account owner's push name from the session store.
+	MyPushName() string
 	// ResolveLID resolves a LID JID (@lid) to the real phone-number JID (@s.whatsapp.net).
 	// Returns the original JID unchanged if it's not a LID or if resolution fails.
 	ResolveLID(jid types.JID) types.JID
@@ -97,6 +99,13 @@ func (l *clientMessageLookup) MyPhoneNumber() string {
 		return ""
 	}
 	return l.client.WAClient.Store.ID.User
+}
+
+func (l *clientMessageLookup) MyPushName() string {
+	if l == nil || l.client == nil || l.client.WAClient == nil || l.client.WAClient.Store == nil {
+		return ""
+	}
+	return l.client.WAClient.Store.PushName
 }
 
 // ResolveLID resolves a LID JID to its phone-number JID using the whatsmeow
