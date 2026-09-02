@@ -21,6 +21,7 @@ func watchdogEventPayload(rawEvent interface{}, lookup MessageLookup, initialSyn
 
 		targetMessageID := protocol.GetKey().GetID()
 		chatJID := event.Info.Chat.String()
+		chatPhoneNumber, chatPushName := resolveChatInfo(event.Info.Chat, lookup)
 
 		actorCategory := "external_participant"
 		if event.Info.IsFromMe {
@@ -74,6 +75,8 @@ func watchdogEventPayload(rawEvent interface{}, lookup MessageLookup, initialSyn
 
 		return watchdogPayload("MessageDeleted", map[string]interface{}{
 			"chatJID":           chatJID,
+			"chatPhoneNumber":   chatPhoneNumber,
+			"chatPushName":      chatPushName,
 			"messageID":         targetMessageID,
 			"timestamp":         event.Info.Timestamp.Format(time.RFC3339Nano),
 			"deleteType":        "for_everyone",
@@ -91,6 +94,8 @@ func watchdogEventPayload(rawEvent interface{}, lookup MessageLookup, initialSyn
 		}
 
 		chatJID := event.ChatJID.String()
+		chatPhoneNumber, chatPushName := resolveChatInfo(event.ChatJID, lookup)
+
 		actorCategory := "company_account"
 		actorPhoneNumber := ""
 		if lookup != nil {
@@ -141,6 +146,8 @@ func watchdogEventPayload(rawEvent interface{}, lookup MessageLookup, initialSyn
 
 		return watchdogPayload("MessageDeleted", map[string]interface{}{
 			"chatJID":           chatJID,
+			"chatPhoneNumber":   chatPhoneNumber,
+			"chatPushName":      chatPushName,
 			"messageID":         event.MessageID,
 			"timestamp":         event.Timestamp.Format(time.RFC3339Nano),
 			"deleteType":        "for_me",
@@ -159,27 +166,19 @@ func watchdogEventPayload(rawEvent interface{}, lookup MessageLookup, initialSyn
 		}
 
 		chatJID := event.JID.String()
-		phoneNumber := ""
-		if event.JID.Server == types.DefaultUserServer || event.JID.Server == types.LegacyUserServer {
-			phoneNumber = event.JID.User
-		} else if event.JID.Server == types.HiddenUserServer && lookup != nil {
-			resolved := lookup.ResolveLID(event.JID)
-			if resolved.Server != types.HiddenUserServer && resolved.User != "" {
-				phoneNumber = resolved.User
-			}
-		}
-		pushName := ""
-		if lookup != nil {
-			pushName = lookup.LookupContact(chatJID)
-		}
+		chatPhoneNumber, chatPushName := resolveChatInfo(event.JID, lookup)
+		phoneNumber := chatPhoneNumber
+		pushName := chatPushName
 
 		return watchdogPayload("ChatArchive", map[string]interface{}{
-			"jid":          chatJID,
-			"timestamp":    event.Timestamp.Format(time.RFC3339Nano),
-			"archived":     event.Action.GetArchived(),
-			"fromFullSync": event.FromFullSync,
-			"phoneNumber":  phoneNumber,
-			"pushName":     pushName,
+			"jid":             chatJID,
+			"chatPhoneNumber": chatPhoneNumber,
+			"chatPushName":    chatPushName,
+			"timestamp":       event.Timestamp.Format(time.RFC3339Nano),
+			"archived":        event.Action.GetArchived(),
+			"fromFullSync":    event.FromFullSync,
+			"phoneNumber":     phoneNumber,
+			"pushName":        pushName,
 		}), true
 
 	case *events.AppState:
@@ -188,33 +187,56 @@ func watchdogEventPayload(rawEvent interface{}, lookup MessageLookup, initialSyn
 		}
 
 		chatJID := event.Index[1]
-		phoneNumber := ""
+		chatPhoneNumber := ""
+		chatPushName := ""
 		if parsedJID, err := types.ParseJID(chatJID); err == nil {
-			if parsedJID.Server == types.DefaultUserServer || parsedJID.Server == types.LegacyUserServer {
-				phoneNumber = parsedJID.User
-			} else if parsedJID.Server == types.HiddenUserServer && lookup != nil {
-				resolved := lookup.ResolveLID(parsedJID)
-				if resolved.Server != types.HiddenUserServer && resolved.User != "" {
-					phoneNumber = resolved.User
-				}
-			}
+			chatPhoneNumber, chatPushName = resolveChatInfo(parsedJID, lookup)
+		} else if lookup != nil {
+			chatPushName = lookup.LookupContact(chatJID)
 		}
-		pushName := ""
-		if lookup != nil {
-			pushName = lookup.LookupContact(chatJID)
-		}
+		phoneNumber := chatPhoneNumber
+		pushName := chatPushName
 
 		return watchdogPayload("ChatLock", map[string]interface{}{
-			"jid":          chatJID,
-			"timestamp":    time.UnixMilli(event.GetTimestamp()).UTC().Format(time.RFC3339Nano),
-			"locked":       event.GetLockChatAction().GetLocked(),
-			"fromFullSync": len(initialSync) > 0 && initialSync[0],
-			"phoneNumber":  phoneNumber,
-			"pushName":     pushName,
+			"jid":             chatJID,
+			"chatPhoneNumber": chatPhoneNumber,
+			"chatPushName":    chatPushName,
+			"timestamp":       time.UnixMilli(event.GetTimestamp()).UTC().Format(time.RFC3339Nano),
+			"locked":          event.GetLockChatAction().GetLocked(),
+			"fromFullSync":    len(initialSync) > 0 && initialSync[0],
+			"phoneNumber":     phoneNumber,
+			"pushName":        pushName,
 		}), true
 	}
 
 	return nil, false
+}
+
+// resolveChatInfo extracts the direct phone number and push name of a chat,
+// resolving LID JIDs to real user phone numbers if available.
+func resolveChatInfo(chatJID types.JID, lookup MessageLookup) (chatPhoneNumber, chatPushName string) {
+	if chatJID.IsEmpty() {
+		return "", ""
+	}
+	resolvedJID := chatJID
+	if chatJID.Server == types.HiddenUserServer && lookup != nil {
+		resolved := lookup.ResolveLID(chatJID)
+		if resolved.Server != types.HiddenUserServer && !resolved.IsEmpty() {
+			resolvedJID = resolved
+		}
+	}
+
+	if resolvedJID.Server == types.DefaultUserServer || resolvedJID.Server == types.LegacyUserServer {
+		chatPhoneNumber = resolvedJID.User
+	}
+
+	if lookup != nil {
+		chatPushName = lookup.LookupContact(chatJID.String())
+		if chatPushName == "" && resolvedJID != chatJID {
+			chatPushName = lookup.LookupContact(resolvedJID.String())
+		}
+	}
+	return chatPhoneNumber, chatPushName
 }
 
 func watchdogPayload(eventType string, event map[string]interface{}) map[string]interface{} {

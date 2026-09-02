@@ -295,8 +295,63 @@ func TestWatchdogEventPayload(t *testing.T) {
 		if event["pushName"] != "Fulano da Silva" {
 			t.Fatalf("expected pushName 'Fulano da Silva', got: %#v", event["pushName"])
 		}
+		if event["chatPhoneNumber"] != "5511888888888" {
+			t.Fatalf("expected chatPhoneNumber '5511888888888', got: %#v", event["chatPhoneNumber"])
+		}
+		if event["chatPushName"] != "Fulano da Silva" {
+			t.Fatalf("expected chatPushName 'Fulano da Silva', got: %#v", event["chatPushName"])
+		}
 		if event["messageContent"] != "Boa tarde tudo bem?" {
 			t.Fatalf("expected messageContent 'Boa tarde tudo bem?', got: %#v", event["messageContent"])
+		}
+	})
+
+	t.Run("delete for me of own message in LID chat identifies chat partner", func(t *testing.T) {
+		lidJID := mustJID(t, "262955211948064@lid")
+		resolvedJID := mustJID(t, "5511987654321@s.whatsapp.net")
+
+		mock := &mockLookup{
+			messages: map[string]struct{ sender, text string }{
+				"2AEC5D3A4116DE6C4520": {
+					sender: "me",
+					text:   "I’m good and you?",
+				},
+			},
+			contacts: map[string]string{
+				"5511987654321@s.whatsapp.net": "Cliente Importante",
+			},
+			myPhone: "5512996754791",
+			lidMap: map[string]types.JID{
+				lidJID.String(): resolvedJID,
+			},
+		}
+
+		payload, ok := watchdogEventPayload(&events.DeleteForMe{
+			ChatJID: lidJID, MessageID: "2AEC5D3A4116DE6C4520", Timestamp: when, IsFromMe: true,
+		}, mock)
+		if !ok || payload["type"] != "MessageDeleted" {
+			t.Fatalf("unexpected payload: %#v", payload)
+		}
+		event := payload["event"].(map[string]interface{})
+		// Monitored account sent and deleted
+		if event["actorPhoneNumber"] != "5512996754791" {
+			t.Fatalf("expected actorPhoneNumber '5512996754791', got: %#v", event["actorPhoneNumber"])
+		}
+		if event["senderPhoneNumber"] != "5512996754791" {
+			t.Fatalf("expected senderPhoneNumber '5512996754791', got: %#v", event["senderPhoneNumber"])
+		}
+		if event["phoneNumber"] != "5512996754791" {
+			t.Fatalf("expected phoneNumber '5512996754791', got: %#v", event["phoneNumber"])
+		}
+		// Interlocutor chat info clearly resolved
+		if event["chatPhoneNumber"] != "5511987654321" {
+			t.Fatalf("expected chatPhoneNumber '5511987654321', got: %#v", event["chatPhoneNumber"])
+		}
+		if event["chatPushName"] != "Cliente Importante" {
+			t.Fatalf("expected chatPushName 'Cliente Importante', got: %#v", event["chatPushName"])
+		}
+		if event["messageContent"] != "I’m good and you?" {
+			t.Fatalf("expected messageContent 'I’m good and you?', got: %#v", event["messageContent"])
 		}
 	})
 
@@ -324,8 +379,14 @@ func TestWatchdogEventPayload(t *testing.T) {
 		if event["phoneNumber"] != "5511888888888" {
 			t.Fatalf("expected phoneNumber '5511888888888', got: %#v", event["phoneNumber"])
 		}
+		if event["chatPhoneNumber"] != "5511888888888" {
+			t.Fatalf("expected chatPhoneNumber '5511888888888', got: %#v", event["chatPhoneNumber"])
+		}
 		if event["pushName"] != "João LID" {
 			t.Fatalf("expected pushName 'João LID', got: %#v", event["pushName"])
+		}
+		if event["chatPushName"] != "João LID" {
+			t.Fatalf("expected chatPushName 'João LID', got: %#v", event["chatPushName"])
 		}
 	})
 }
