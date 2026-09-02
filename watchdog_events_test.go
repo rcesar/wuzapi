@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -88,6 +90,41 @@ func TestWatchdogSubscriptionEventsAreSupported(t *testing.T) {
 	for _, eventType := range requiredEvents {
 		if !isValidEventType(eventType) {
 			t.Errorf("Watchdog subscription event %q is not supported", eventType)
+		}
+	}
+}
+
+func TestWatchdogEventsInDashboardUI(t *testing.T) {
+	content, err := os.ReadFile("static/dashboard/index.html")
+	if err != nil {
+		t.Fatalf("failed to read static/dashboard/index.html: %v", err)
+	}
+	html := string(content)
+
+	requiredEvents := []string{
+		"MessageDeleted",
+		"ChatArchive",
+		"ChatLock",
+		"ReadReceipt",
+	}
+
+	for _, evt := range requiredEvents {
+		expectedOption := `<option value="` + evt + `"`
+		count := strings.Count(html, expectedOption)
+		if count < 2 {
+			t.Errorf("expected at least 2 instances of %q in dashboard index.html (webhookEvents and webhookEventsInstance), found %d", expectedOption, count)
+		}
+	}
+
+	loginContent, err := os.ReadFile("static/login/index.html")
+	if err != nil {
+		t.Fatalf("failed to read static/login/index.html: %v", err)
+	}
+	loginHtml := string(loginContent)
+	for _, evt := range requiredEvents {
+		expectedOption := `<option value="` + evt + `"`
+		if !strings.Contains(loginHtml, expectedOption) {
+			t.Errorf("expected %q in login index.html", expectedOption)
 		}
 	}
 }

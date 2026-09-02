@@ -600,8 +600,10 @@
                     <h4>Messages and Communication</h4>
                     <ul>
                         <li><code>Message</code> - Message received or sent</li>
+                        <li><code>MessageDeleted</code> - Message deleted (for everyone or for me)</li>
                         <li><code>UndecryptableMessage</code> - Message that could not be decrypted</li>
-                        <li><code>Receipt</code> - Delivery/read confirmation</li>
+                        <li><code>Receipt</code> - Delivery confirmation</li>
+                        <li><code>ReadReceipt</code> - Read confirmation</li>
                         <li><code>MediaRetry</code> - Media resend attempt</li>
                     </ul>
                     
@@ -645,6 +647,8 @@
                     <h4>Synchronization and State</h4>
                     <ul>
                         <li><code>AppState</code> - Application state</li>
+                        <li><code>ChatArchive</code> - Chat archived or unarchived</li>
+                        <li><code>ChatLock</code> - Chat locked or unlocked</li>
                         <li><code>AppStateSyncComplete</code> - Synchronization complete</li>
                         <li><code>HistorySync</code> - History synchronization</li>
                         <li><code>OfflineSyncCompleted</code> - Offline synchronization completed</li>
