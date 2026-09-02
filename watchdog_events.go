@@ -28,6 +28,12 @@ func watchdogEventPayload(rawEvent interface{}, lookup MessageLookup, initialSyn
 		}
 
 		actorPhoneNumber := event.Info.Sender.User
+		if event.Info.Sender.Server == types.HiddenUserServer && lookup != nil {
+			resolved := lookup.ResolveLID(event.Info.Sender)
+			if resolved.Server != types.HiddenUserServer && resolved.User != "" {
+				actorPhoneNumber = resolved.User
+			}
+		}
 		if event.Info.IsFromMe && lookup != nil && actorPhoneNumber == "" {
 			actorPhoneNumber = lookup.MyPhoneNumber()
 		}
@@ -47,7 +53,7 @@ func watchdogEventPayload(rawEvent interface{}, lookup MessageLookup, initialSyn
 				if origSenderJID == "me" {
 					senderPhoneNumber = lookup.MyPhoneNumber()
 				} else if origSenderJID != "" {
-					senderPhoneNumber = extractPhoneNumber(origSenderJID)
+					senderPhoneNumber = extractPhoneNumber(origSenderJID, lookup)
 					if pushName == "" || origSenderJID != event.Info.Sender.String() {
 						if origPush := lookup.LookupContact(origSenderJID); origPush != "" {
 							pushName = origPush
@@ -102,14 +108,23 @@ func watchdogEventPayload(rawEvent interface{}, lookup MessageLookup, initialSyn
 				if origSenderJID == "me" {
 					senderPhoneNumber = lookup.MyPhoneNumber()
 				} else if origSenderJID != "" {
-					senderPhoneNumber = extractPhoneNumber(origSenderJID)
+					senderPhoneNumber = extractPhoneNumber(origSenderJID, lookup)
 					pushName = lookup.LookupContact(origSenderJID)
 				}
 			}
 		}
 
 		if senderPhoneNumber == "" && !event.SenderJID.IsEmpty() {
-			senderPhoneNumber = event.SenderJID.User
+			senderJID := event.SenderJID
+			if senderJID.Server == types.HiddenUserServer && lookup != nil {
+				resolved := lookup.ResolveLID(senderJID)
+				if resolved.Server != types.HiddenUserServer && resolved.User != "" {
+					senderPhoneNumber = resolved.User
+				}
+			}
+			if senderPhoneNumber == "" {
+				senderPhoneNumber = senderJID.User
+			}
 			if pushName == "" && lookup != nil {
 				pushName = lookup.LookupContact(event.SenderJID.String())
 			}
@@ -147,6 +162,11 @@ func watchdogEventPayload(rawEvent interface{}, lookup MessageLookup, initialSyn
 		phoneNumber := ""
 		if event.JID.Server == types.DefaultUserServer || event.JID.Server == types.LegacyUserServer {
 			phoneNumber = event.JID.User
+		} else if event.JID.Server == types.HiddenUserServer && lookup != nil {
+			resolved := lookup.ResolveLID(event.JID)
+			if resolved.Server != types.HiddenUserServer && resolved.User != "" {
+				phoneNumber = resolved.User
+			}
 		}
 		pushName := ""
 		if lookup != nil {
@@ -172,6 +192,11 @@ func watchdogEventPayload(rawEvent interface{}, lookup MessageLookup, initialSyn
 		if parsedJID, err := types.ParseJID(chatJID); err == nil {
 			if parsedJID.Server == types.DefaultUserServer || parsedJID.Server == types.LegacyUserServer {
 				phoneNumber = parsedJID.User
+			} else if parsedJID.Server == types.HiddenUserServer && lookup != nil {
+				resolved := lookup.ResolveLID(parsedJID)
+				if resolved.Server != types.HiddenUserServer && resolved.User != "" {
+					phoneNumber = resolved.User
+				}
 			}
 		}
 		pushName := ""

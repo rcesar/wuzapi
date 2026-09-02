@@ -26,6 +26,7 @@ type mockLookup struct {
 	messages map[string]struct{ sender, text string }
 	contacts map[string]string
 	myPhone  string
+	lidMap   map[string]types.JID // LID string → resolved phone-number JID
 }
 
 func (m *mockLookup) LookupMessage(chatJID, messageID string) (string, string, bool) {
@@ -39,6 +40,14 @@ func (m *mockLookup) LookupMessage(chatJID, messageID string) (string, string, b
 
 func (m *mockLookup) LookupContact(jid string) string {
 	if m.contacts != nil {
+		// Mirror real implementation: resolve LID before contact lookup.
+		if m.lidMap != nil {
+			if parsedJID, err := types.ParseJID(jid); err == nil && parsedJID.Server == types.HiddenUserServer {
+				if resolved, ok := m.lidMap[parsedJID.String()]; ok {
+					jid = resolved.String()
+				}
+			}
+		}
 		return m.contacts[jid]
 	}
 	return ""
@@ -46,6 +55,15 @@ func (m *mockLookup) LookupContact(jid string) string {
 
 func (m *mockLookup) MyPhoneNumber() string {
 	return m.myPhone
+}
+
+func (m *mockLookup) ResolveLID(jid types.JID) types.JID {
+	if m.lidMap != nil {
+		if resolved, ok := m.lidMap[jid.String()]; ok {
+			return resolved
+		}
+	}
+	return jid
 }
 
 func TestWatchdogSubscriptionEventsAreSupported(t *testing.T) {
@@ -238,6 +256,76 @@ func TestWatchdogEventPayload(t *testing.T) {
 		}
 		if event["pushName"] != "Carlos Souza" {
 			t.Fatalf("expected pushName 'Carlos Souza', got: %#v", event["pushName"])
+		}
+	})
+
+	t.Run("delete for me with LID resolves to real phone number", func(t *testing.T) {
+		lidJID := mustJID(t, "262955211948064@lid")
+		resolvedJID := mustJID(t, "5511888888888@s.whatsapp.net")
+
+		mock := &mockLookup{
+			messages: map[string]struct{ sender, text string }{
+				"LID-MSG-1": {
+					sender: "262955211948064@lid",
+					text:   "Boa tarde tudo bem?",
+				},
+			},
+			contacts: map[string]string{
+				"5511888888888@s.whatsapp.net": "Fulano da Silva",
+			},
+			myPhone: "5512996754791",
+			lidMap: map[string]types.JID{
+				lidJID.String(): resolvedJID,
+			},
+		}
+
+		payload, ok := watchdogEventPayload(&events.DeleteForMe{
+			ChatJID: lidJID, MessageID: "LID-MSG-1", Timestamp: when,
+		}, mock)
+		if !ok || payload["type"] != "MessageDeleted" {
+			t.Fatalf("unexpected payload: %#v", payload)
+		}
+		event := payload["event"].(map[string]interface{})
+		if event["senderPhoneNumber"] != "5511888888888" {
+			t.Fatalf("expected senderPhoneNumber '5511888888888', got: %#v", event["senderPhoneNumber"])
+		}
+		if event["phoneNumber"] != "5511888888888" {
+			t.Fatalf("expected phoneNumber '5511888888888', got: %#v", event["phoneNumber"])
+		}
+		if event["pushName"] != "Fulano da Silva" {
+			t.Fatalf("expected pushName 'Fulano da Silva', got: %#v", event["pushName"])
+		}
+		if event["messageContent"] != "Boa tarde tudo bem?" {
+			t.Fatalf("expected messageContent 'Boa tarde tudo bem?', got: %#v", event["messageContent"])
+		}
+	})
+
+	t.Run("archive with LID resolves phone number", func(t *testing.T) {
+		lidJID := mustJID(t, "262955211948064@lid")
+		resolvedJID := mustJID(t, "5511888888888@s.whatsapp.net")
+
+		mock := &mockLookup{
+			contacts: map[string]string{
+				"5511888888888@s.whatsapp.net": "João LID",
+			},
+			lidMap: map[string]types.JID{
+				lidJID.String(): resolvedJID,
+			},
+		}
+
+		payload, ok := watchdogEventPayload(&events.Archive{
+			JID: lidJID, Timestamp: when,
+			Action: &waSyncAction.ArchiveChatAction{Archived: proto.Bool(true)},
+		}, mock)
+		if !ok || payload["type"] != "ChatArchive" {
+			t.Fatalf("unexpected payload: %#v", payload)
+		}
+		event := payload["event"].(map[string]interface{})
+		if event["phoneNumber"] != "5511888888888" {
+			t.Fatalf("expected phoneNumber '5511888888888', got: %#v", event["phoneNumber"])
+		}
+		if event["pushName"] != "João LID" {
+			t.Fatalf("expected pushName 'João LID', got: %#v", event["pushName"])
 		}
 	})
 }

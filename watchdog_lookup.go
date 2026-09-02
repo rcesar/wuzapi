@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"time"
 
 	"github.com/rs/zerolog/log"
 	"go.mau.fi/whatsmeow/types"
@@ -14,9 +15,13 @@ type MessageLookup interface {
 	// LookupMessage retrieves stored information about a message by chat and message ID.
 	LookupMessage(chatJID, messageID string) (senderJID, textContent string, found bool)
 	// LookupContact retrieves a contact's PushName given a JID string.
+	// If the JID is a LID (@lid), it first resolves it to the phone-number JID.
 	LookupContact(jidStr string) string
 	// MyPhoneNumber returns the account owner's phone number.
 	MyPhoneNumber() string
+	// ResolveLID resolves a LID JID (@lid) to the real phone-number JID (@s.whatsapp.net).
+	// Returns the original JID unchanged if it's not a LID or if resolution fails.
+	ResolveLID(jid types.JID) types.JID
 }
 
 type clientMessageLookup struct {
@@ -61,6 +66,16 @@ func (l *clientMessageLookup) LookupContact(jidStr string) string {
 	if err != nil {
 		return ""
 	}
+
+	// If the JID is a LID, resolve it to the phone-number JID first
+	// so the contact store lookup finds the entry keyed by @s.whatsapp.net.
+	if parsedJID.Server == types.HiddenUserServer {
+		resolved := l.ResolveLID(parsedJID)
+		if resolved.Server != types.HiddenUserServer {
+			parsedJID = resolved
+		}
+	}
+
 	contact, err := l.client.WAClient.Store.Contacts.GetContact(context.Background(), parsedJID)
 	if err != nil {
 		return ""
@@ -84,12 +99,49 @@ func (l *clientMessageLookup) MyPhoneNumber() string {
 	return l.client.WAClient.Store.ID.User
 }
 
-func extractPhoneNumber(jidStr string) string {
+// ResolveLID resolves a LID JID to its phone-number JID using the whatsmeow
+// LID-to-PN mapping store. Returns the original JID if it's not a LID or
+// resolution fails.
+func (l *clientMessageLookup) ResolveLID(jid types.JID) types.JID {
+	if l == nil || l.client == nil || l.client.WAClient == nil {
+		return jid
+	}
+	if jid.Server != types.HiddenUserServer {
+		return jid
+	}
+	client := l.client.WAClient
+	if client.Store == nil || client.Store.LIDs == nil {
+		return jid
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	pn, err := client.Store.LIDs.GetPNForLID(ctx, jid)
+	if err != nil || pn.IsEmpty() {
+		log.Debug().Err(err).Str("lid", jid.String()).Msg("Could not resolve LID to phone number")
+		return jid
+	}
+	return pn
+}
+
+// extractPhoneNumber extracts the phone number from a JID string.
+// When a lookup is provided and the JID is a LID (@lid), it resolves the LID
+// to the real phone number first.
+func extractPhoneNumber(jidStr string, lookup ...MessageLookup) string {
 	if jidStr == "" || jidStr == "me" {
 		return ""
 	}
 	parsed, err := types.ParseJID(jidStr)
-	if err == nil && parsed.User != "" {
+	if err != nil {
+		return jidStr
+	}
+	// If it's a LID and we have a lookup, resolve to real phone number.
+	if parsed.Server == types.HiddenUserServer && len(lookup) > 0 && lookup[0] != nil {
+		resolved := lookup[0].ResolveLID(parsed)
+		if resolved.Server != types.HiddenUserServer && resolved.User != "" {
+			return resolved.User
+		}
+	}
+	if parsed.User != "" {
 		return parsed.User
 	}
 	return jidStr
