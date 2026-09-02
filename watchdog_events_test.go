@@ -22,6 +22,27 @@ func mustJID(t *testing.T, value string) types.JID {
 	return jid
 }
 
+func TestWatchdogSubscriptionEventsAreSupported(t *testing.T) {
+	requiredEvents := []string{
+		"Message",
+		"HistorySync",
+		"Connected",
+		"Disconnected",
+		"ConnectFailure",
+		"KeepAliveRestored",
+		"LoggedOut",
+		"MessageDeleted",
+		"ChatArchive",
+		"ChatLock",
+	}
+
+	for _, eventType := range requiredEvents {
+		if !isValidEventType(eventType) {
+			t.Errorf("Watchdog subscription event %q is not supported", eventType)
+		}
+	}
+}
+
 func TestWatchdogEventPayload(t *testing.T) {
 	chat := mustJID(t, "5511999999999@s.whatsapp.net")
 	when := time.Date(2026, 8, 21, 14, 0, 0, 0, time.UTC)
