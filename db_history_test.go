@@ -56,3 +56,51 @@ func TestSaveMessageToHistoryIdempotent(t *testing.T) {
 		t.Fatalf("expected 2 distinct rows, got %d", count)
 	}
 }
+
+func TestLookupMessageFallbackWhenTextContentEmpty(t *testing.T) {
+	s := makeTestServer(t)
+
+	const (
+		userID = "user-lookup"
+		chat   = "123456@s.whatsapp.net"
+		sender = "123456@s.whatsapp.net"
+	)
+
+	lookup := &clientMessageLookup{s: s, userID: userID}
+
+	// 1. Image with empty text_content (e.g. from API or view-once)
+	if err := s.saveMessageToHistory(userID, chat, sender, "MSG-IMG-1", "image", "", "", "", "{}"); err != nil {
+		t.Fatalf("insert image failed: %v", err)
+	}
+	_, text, found := lookup.LookupMessage(chat, "MSG-IMG-1")
+	if !found || text != ":image:" {
+		t.Errorf("expected found=true, text=':image:'; got found=%v, text=%q", found, text)
+	}
+
+	// 2. Video with empty text_content
+	if err := s.saveMessageToHistory(userID, chat, sender, "MSG-VID-1", "video", "", "", "", "{}"); err != nil {
+		t.Fatalf("insert video failed: %v", err)
+	}
+	_, text, found = lookup.LookupMessage(chat, "MSG-VID-1")
+	if !found || text != ":video:" {
+		t.Errorf("expected found=true, text=':video:'; got found=%v, text=%q", found, text)
+	}
+
+	// 3. Audio with empty text_content
+	if err := s.saveMessageToHistory(userID, chat, sender, "MSG-AUD-1", "audio", "", "", "", "{}"); err != nil {
+		t.Fatalf("insert audio failed: %v", err)
+	}
+	_, text, found = lookup.LookupMessage(chat, "MSG-AUD-1")
+	if !found || text != ":audio:" {
+		t.Errorf("expected found=true, text=':audio:'; got found=%v, text=%q", found, text)
+	}
+
+	// 4. Media with caption: should keep caption
+	if err := s.saveMessageToHistory(userID, chat, sender, "MSG-CAP-1", "image", "foto da receita", "", "", "{}"); err != nil {
+		t.Fatalf("insert image with caption failed: %v", err)
+	}
+	_, text, found = lookup.LookupMessage(chat, "MSG-CAP-1")
+	if !found || text != "foto da receita" {
+		t.Errorf("expected found=true, text='foto da receita'; got found=%v, text=%q", found, text)
+	}
+}

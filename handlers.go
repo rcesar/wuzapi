@@ -7192,6 +7192,24 @@ func (s *server) syncHistoryForChat(ctx context.Context, userID string, chatJID 
 // save outgoing message to history
 func (s *server) saveOutgoingMessageToHistory(userID, chatJID, messageID, messageType, textContent, mediaLink string, historyLimit int) {
 	if historyLimit > 0 {
+		if textContent == "" {
+			switch messageType {
+			case "image":
+				textContent = ":image:"
+			case "video":
+				textContent = ":video:"
+			case "audio":
+				textContent = ":audio:"
+			case "document":
+				textContent = ":document:"
+			case "sticker":
+				textContent = ":sticker:"
+			case "contact":
+				textContent = ":contact:"
+			case "location":
+				textContent = ":location:"
+			}
+		}
 		err := s.saveMessageToHistory(userID, chatJID, "me", messageID, messageType, textContent, mediaLink, "", "")
 		if err != nil {
 			log.Error().Err(err).Msg("Failed to save outgoing message to history")

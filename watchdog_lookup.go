@@ -39,11 +39,12 @@ func (l *clientMessageLookup) LookupMessage(chatJID, messageID string) (senderJI
 
 	var row struct {
 		SenderJID   string `db:"sender_jid"`
+		MessageType string `db:"message_type"`
 		TextContent string `db:"text_content"`
 	}
 
 	query := l.s.db.Rebind(`
-		SELECT sender_jid, text_content
+		SELECT sender_jid, message_type, text_content
 		FROM message_history
 		WHERE user_id = ? AND message_id = ?
 		LIMIT 1
@@ -57,7 +58,27 @@ func (l *clientMessageLookup) LookupMessage(chatJID, messageID string) (senderJI
 		return "", "", false
 	}
 
-	return row.SenderJID, row.TextContent, true
+	textContent = row.TextContent
+	if textContent == "" {
+		switch row.MessageType {
+		case "image":
+			textContent = ":image:"
+		case "video":
+			textContent = ":video:"
+		case "audio":
+			textContent = ":audio:"
+		case "document":
+			textContent = ":document:"
+		case "sticker":
+			textContent = ":sticker:"
+		case "contact":
+			textContent = ":contact:"
+		case "location":
+			textContent = ":location:"
+		}
+	}
+
+	return row.SenderJID, textContent, true
 }
 
 func (l *clientMessageLookup) LookupContact(jidStr string) string {

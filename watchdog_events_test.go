@@ -469,4 +469,64 @@ func TestWatchdogEventPayload(t *testing.T) {
 			t.Fatalf("expected chatPushName 'João LID', got: %#v", event["chatPushName"])
 		}
 	})
+
+	t.Run("delete for me of view once image in LID chat identifies content and chat partner", func(t *testing.T) {
+		lidJID := mustJID(t, "262955211948064@lid")
+		contactJID := mustJID(t, "5512982698373@s.whatsapp.net")
+
+		mock := &mockLookup{
+			messages: map[string]struct{ sender, text string }{
+				"2AD4FB9167D5152218B6": {
+					sender: "me",
+					text:   ":image:",
+				},
+			},
+			contacts: map[string]string{
+				contactJID.String(): "Renan Cesar",
+			},
+			lidMap: map[string]types.JID{
+				lidJID.String(): contactJID,
+			},
+			myPhone:    "5512996754791",
+			myPushName: "Vivva Laboratorio",
+		}
+
+		payload, ok := watchdogEventPayload(&events.DeleteForMe{
+			ChatJID:   lidJID,
+			MessageID: "2AD4FB9167D5152218B6",
+			Timestamp: when,
+			IsFromMe:  true,
+		}, mock)
+		if !ok || payload["type"] != "MessageDeleted" {
+			t.Fatalf("unexpected payload: %#v", payload)
+		}
+		event := payload["event"].(map[string]interface{})
+		if event["deleteType"] != "for_me" || event["actorCategory"] != "company_account" {
+			t.Fatalf("unexpected delete-for-me event: %#v", event)
+		}
+		if event["messageID"] != "2AD4FB9167D5152218B6" {
+			t.Fatalf("expected messageID '2AD4FB9167D5152218B6', got: %#v", event["messageID"])
+		}
+		if event["messageContent"] != ":image:" {
+			t.Fatalf("expected messageContent ':image:', got: %#v", event["messageContent"])
+		}
+		if event["actorPhoneNumber"] != "5512996754791" {
+			t.Fatalf("expected actorPhoneNumber '5512996754791', got: %#v", event["actorPhoneNumber"])
+		}
+		if event["actorPushName"] != "Vivva Laboratorio" {
+			t.Fatalf("expected actorPushName 'Vivva Laboratorio', got: %#v", event["actorPushName"])
+		}
+		if event["senderPhoneNumber"] != "5512996754791" {
+			t.Fatalf("expected senderPhoneNumber '5512996754791', got: %#v", event["senderPhoneNumber"])
+		}
+		if event["senderPushName"] != "Vivva Laboratorio" {
+			t.Fatalf("expected senderPushName 'Vivva Laboratorio', got: %#v", event["senderPushName"])
+		}
+		if event["chatPhoneNumber"] != "5512982698373" {
+			t.Fatalf("expected chatPhoneNumber '5512982698373', got: %#v", event["chatPhoneNumber"])
+		}
+		if event["chatPushName"] != "Renan Cesar" {
+			t.Fatalf("expected chatPushName 'Renan Cesar', got: %#v", event["chatPushName"])
+		}
+	})
 }

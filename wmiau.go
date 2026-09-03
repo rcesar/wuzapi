@@ -1196,6 +1196,13 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			}
 		}
 
+		if unwrappedMsg, isVO := unwrapE2EMessage(evt.Message); unwrappedMsg != nil {
+			evt.Message = unwrappedMsg
+			if isVO {
+				evt.IsViewOnce = true
+			}
+		}
+
 		if !*skipMedia {
 
 			isIncoming := !evt.Info.IsFromMe
@@ -1503,7 +1510,11 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 						}
 
 						// Get message content
-						message := msg.Message.GetMessage()
+						rawMessage := msg.Message.GetMessage()
+						if rawMessage == nil {
+							continue
+						}
+						message, _ := unwrapE2EMessage(rawMessage)
 						if message == nil {
 							continue
 						}
