@@ -478,7 +478,7 @@ func TestWatchdogEventPayload(t *testing.T) {
 			messages: map[string]struct{ sender, text string }{
 				"2AD4FB9167D5152218B6": {
 					sender: "me",
-					text:   ":image:",
+					text:   ":view_once_image:",
 				},
 			},
 			contacts: map[string]string{
@@ -507,8 +507,8 @@ func TestWatchdogEventPayload(t *testing.T) {
 		if event["messageID"] != "2AD4FB9167D5152218B6" {
 			t.Fatalf("expected messageID '2AD4FB9167D5152218B6', got: %#v", event["messageID"])
 		}
-		if event["messageContent"] != ":image:" {
-			t.Fatalf("expected messageContent ':image:', got: %#v", event["messageContent"])
+		if event["messageContent"] != ":view_once_image:" {
+			t.Fatalf("expected messageContent ':view_once_image:', got: %#v", event["messageContent"])
 		}
 		if event["actorPhoneNumber"] != "5512996754791" {
 			t.Fatalf("expected actorPhoneNumber '5512996754791', got: %#v", event["actorPhoneNumber"])

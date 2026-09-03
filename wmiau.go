@@ -1324,11 +1324,23 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 				if textContent == "" {
 					switch messageType {
 					case "image":
-						textContent = ":image:"
+						if evt.IsViewOnce {
+							textContent = ":view_once_image:"
+						} else {
+							textContent = ":image:"
+						}
 					case "video":
-						textContent = ":video:"
+						if evt.IsViewOnce {
+							textContent = ":view_once_video:"
+						} else {
+							textContent = ":video:"
+						}
 					case "audio":
-						textContent = ":audio:"
+						if evt.IsViewOnce {
+							textContent = ":view_once_audio:"
+						} else {
+							textContent = ":audio:"
+						}
 					case "document":
 						textContent = ":document:"
 					case "sticker":
@@ -1785,15 +1797,14 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			textContent := ":undecryptable:"
 
 			if evt.IsUnavailable && (evt.UnavailableType == events.UnavailableTypeViewOnce || evt.UnavailableType == "view_once") {
-				messageType = "image"
+				messageType = "view_once_image"
+				textContent = ":view_once_image:"
 				if evt.Info.MediaType == "video" {
-					messageType = "video"
-					textContent = ":video:"
+					messageType = "view_once_video"
+					textContent = ":view_once_video:"
 				} else if evt.Info.MediaType == "audio" {
-					messageType = "audio"
-					textContent = ":audio:"
-				} else {
-					textContent = ":image:"
+					messageType = "view_once_audio"
+					textContent = ":view_once_audio:"
 				}
 			}
 

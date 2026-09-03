@@ -117,8 +117,8 @@ func TestUndecryptableViewOnceHistoryAndLookup(t *testing.T) {
 
 	lookup := &clientMessageLookup{s: s, userID: userID}
 
-	// Simulates saving UndecryptableMessage with view_once
-	if err := s.saveMessageToHistory(userID, chat, sender, msgID, "image", ":image:", "", "", "{}"); err != nil {
+	// 1. Simulates saving UndecryptableMessage with view_once_image
+	if err := s.saveMessageToHistory(userID, chat, sender, msgID, "view_once_image", ":view_once_image:", "", "", "{}"); err != nil {
 		t.Fatalf("insert undecryptable view-once failed: %v", err)
 	}
 
@@ -129,7 +129,16 @@ func TestUndecryptableViewOnceHistoryAndLookup(t *testing.T) {
 	if origSender != "me" {
 		t.Errorf("expected origSender 'me', got %q", origSender)
 	}
-	if text != ":image:" {
-		t.Errorf("expected text ':image:', got %q", text)
+	if text != ":view_once_image:" {
+		t.Errorf("expected text ':view_once_image:', got %q", text)
+	}
+
+	// 2. Test fallback when text_content is empty for message_type view_once_image
+	if err := s.saveMessageToHistory(userID, chat, sender, "VO-EMPTY-1", "view_once_image", "", "", "", "{}"); err != nil {
+		t.Fatalf("insert empty view-once failed: %v", err)
+	}
+	_, text, found = lookup.LookupMessage(chat, "VO-EMPTY-1")
+	if !found || text != ":view_once_image:" {
+		t.Errorf("expected fallback ':view_once_image:', got found=%v, text=%q", found, text)
 	}
 }

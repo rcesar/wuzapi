@@ -61,6 +61,12 @@ func (l *clientMessageLookup) LookupMessage(chatJID, messageID string) (senderJI
 	textContent = row.TextContent
 	if textContent == "" {
 		switch row.MessageType {
+		case "view_once_image", "view_once":
+			textContent = ":view_once_image:"
+		case "view_once_video":
+			textContent = ":view_once_video:"
+		case "view_once_audio":
+			textContent = ":view_once_audio:"
 		case "image":
 			textContent = ":image:"
 		case "video":
