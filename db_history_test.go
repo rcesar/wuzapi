@@ -104,3 +104,32 @@ func TestLookupMessageFallbackWhenTextContentEmpty(t *testing.T) {
 		t.Errorf("expected found=true, text='foto da receita'; got found=%v, text=%q", found, text)
 	}
 }
+
+func TestUndecryptableViewOnceHistoryAndLookup(t *testing.T) {
+	s := makeTestServer(t)
+
+	const (
+		userID = "user-undecryptable"
+		chat   = "262955211948064@lid"
+		sender = "me"
+		msgID  = "2A417B6A7DFBB4197E96"
+	)
+
+	lookup := &clientMessageLookup{s: s, userID: userID}
+
+	// Simulates saving UndecryptableMessage with view_once
+	if err := s.saveMessageToHistory(userID, chat, sender, msgID, "image", ":image:", "", "", "{}"); err != nil {
+		t.Fatalf("insert undecryptable view-once failed: %v", err)
+	}
+
+	origSender, text, found := lookup.LookupMessage(chat, msgID)
+	if !found {
+		t.Fatalf("expected message to be found in history")
+	}
+	if origSender != "me" {
+		t.Errorf("expected origSender 'me', got %q", origSender)
+	}
+	if text != ":image:" {
+		t.Errorf("expected text ':image:', got %q", text)
+	}
+}

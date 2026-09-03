@@ -1769,7 +1769,63 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 	case *events.UndecryptableMessage:
 		postmap["type"] = "UndecryptableMessage"
 		dowebhook = 1
-		log.Warn().Str("info", evt.Info.SourceString()).Msg("Undecryptable message received")
+		log.Warn().Str("id", evt.Info.ID).Str("info", evt.Info.SourceString()).Str("unavailableType", string(evt.UnavailableType)).Msg("Undecryptable message received")
+
+		var historyLimit int
+		userinfo, found := userinfocache.Get(mycli.token)
+		if found {
+			historyStr := userinfo.(Values).Get("History")
+			historyLimit, _ = strconv.Atoi(historyStr)
+		} else {
+			historyLimit = 0
+		}
+
+		if historyLimit > 0 && evt.Info.ID != "" && !evt.Info.Chat.IsEmpty() {
+			messageType := "undecryptable"
+			textContent := ":undecryptable:"
+
+			if evt.IsUnavailable && (evt.UnavailableType == events.UnavailableTypeViewOnce || evt.UnavailableType == "view_once") {
+				messageType = "image"
+				if evt.Info.MediaType == "video" {
+					messageType = "video"
+					textContent = ":video:"
+				} else if evt.Info.MediaType == "audio" {
+					messageType = "audio"
+					textContent = ":audio:"
+				} else {
+					textContent = ":image:"
+				}
+			}
+
+			senderJID := evt.Info.Sender.String()
+			if evt.Info.IsFromMe {
+				senderJID = "me"
+			} else if senderJID == "" {
+				senderJID = evt.Info.Chat.String()
+			}
+
+			evtJSON, err := json.Marshal(evt)
+			if err != nil {
+				evtJSON = []byte("{}")
+			}
+
+			err = mycli.s.saveMessageToHistory(
+				mycli.userID,
+				evt.Info.Chat.String(),
+				senderJID,
+				evt.Info.ID,
+				messageType,
+				textContent,
+				"",
+				"",
+				string(evtJSON),
+			)
+			if err != nil {
+				log.Error().Err(err).Msg("Failed to save UndecryptableMessage to history")
+			} else {
+				_ = mycli.s.trimMessageHistory(mycli.userID, evt.Info.Chat.String(), historyLimit)
+			}
+		}
 	case *events.MediaRetry:
 		postmap["type"] = "MediaRetry"
 		dowebhook = 1
