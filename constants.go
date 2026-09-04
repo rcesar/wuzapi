@@ -42,7 +42,10 @@ var supportedEventTypes = []string{
 	// Synchronization and State
 	"AppState",
 	"ChatArchive",
+	"ChatClear",
+	"ChatDelete",
 	"ChatLock",
+	"ChatMute",
 	"AppStateSyncComplete",
 	"HistorySync",
 	"OfflineSyncCompleted",

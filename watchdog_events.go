@@ -235,6 +235,75 @@ func watchdogEventPayload(rawEvent interface{}, lookup MessageLookup, initialSyn
 			"phoneNumber":     phoneNumber,
 			"pushName":        pushName,
 		}), true
+
+	case *events.ClearChat:
+		if event.JID.IsEmpty() {
+			return nil, false
+		}
+
+		chatJID := event.JID.String()
+		chatPhoneNumber, chatPushName := resolveChatInfo(event.JID, lookup)
+		phoneNumber := chatPhoneNumber
+		pushName := chatPushName
+
+		return watchdogPayload("ChatClear", map[string]interface{}{
+			"jid":             chatJID,
+			"chatPhoneNumber": chatPhoneNumber,
+			"chatPushName":    chatPushName,
+			"timestamp":       event.Timestamp.Format(time.RFC3339Nano),
+			"fromFullSync":    event.FromFullSync,
+			"deleteMedia":     event.DeleteMedia,
+			"phoneNumber":     phoneNumber,
+			"pushName":        pushName,
+		}), true
+
+	case *events.DeleteChat:
+		if event.JID.IsEmpty() {
+			return nil, false
+		}
+
+		chatJID := event.JID.String()
+		chatPhoneNumber, chatPushName := resolveChatInfo(event.JID, lookup)
+		phoneNumber := chatPhoneNumber
+		pushName := chatPushName
+
+		return watchdogPayload("ChatDelete", map[string]interface{}{
+			"jid":             chatJID,
+			"chatPhoneNumber": chatPhoneNumber,
+			"chatPushName":    chatPushName,
+			"timestamp":       event.Timestamp.Format(time.RFC3339Nano),
+			"fromFullSync":    event.FromFullSync,
+			"deleteMedia":     event.DeleteMedia,
+			"phoneNumber":     phoneNumber,
+			"pushName":        pushName,
+		}), true
+
+	case *events.Mute:
+		if event.Action == nil || event.JID.IsEmpty() {
+			return nil, false
+		}
+
+		chatJID := event.JID.String()
+		chatPhoneNumber, chatPushName := resolveChatInfo(event.JID, lookup)
+		phoneNumber := chatPhoneNumber
+		pushName := chatPushName
+
+		muteEndTimestamp := ""
+		if event.Action.MuteEndTimestamp != nil {
+			muteEndTimestamp = time.Unix(*event.Action.MuteEndTimestamp, 0).UTC().Format(time.RFC3339Nano)
+		}
+
+		return watchdogPayload("ChatMute", map[string]interface{}{
+			"jid":              chatJID,
+			"chatPhoneNumber":  chatPhoneNumber,
+			"chatPushName":     chatPushName,
+			"timestamp":        event.Timestamp.Format(time.RFC3339Nano),
+			"muted":            event.Action.GetMuted(),
+			"muteEndTimestamp": muteEndTimestamp,
+			"fromFullSync":     event.FromFullSync,
+			"phoneNumber":      phoneNumber,
+			"pushName":         pushName,
+		}), true
 	}
 
 	return nil, false

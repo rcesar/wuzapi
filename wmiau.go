@@ -1720,7 +1720,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			}()
 		}
 
-	case *events.DeleteForMe, *events.Archive:
+	case *events.DeleteForMe, *events.Archive, *events.ClearChat, *events.DeleteChat, *events.Mute:
 		if normalizedEvent, ok := watchdogEventPayload(evt, lookup); ok {
 			postmap = normalizedEvent
 			dowebhook = 1

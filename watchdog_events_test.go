@@ -84,7 +84,10 @@ func TestWatchdogSubscriptionEventsAreSupported(t *testing.T) {
 		"LoggedOut",
 		"MessageDeleted",
 		"ChatArchive",
+		"ChatClear",
+		"ChatDelete",
 		"ChatLock",
+		"ChatMute",
 	}
 
 	for _, eventType := range requiredEvents {
@@ -104,7 +107,10 @@ func TestWatchdogEventsInDashboardUI(t *testing.T) {
 	requiredEvents := []string{
 		"MessageDeleted",
 		"ChatArchive",
+		"ChatClear",
+		"ChatDelete",
 		"ChatLock",
+		"ChatMute",
 		"ReadReceipt",
 	}
 
@@ -527,6 +533,149 @@ func TestWatchdogEventPayload(t *testing.T) {
 		}
 		if event["chatPushName"] != "Renan Cesar" {
 			t.Fatalf("expected chatPushName 'Renan Cesar', got: %#v", event["chatPushName"])
+		}
+	})
+
+	t.Run("clear chat with phone number and push name", func(t *testing.T) {
+		mock := &mockLookup{
+			contacts: map[string]string{
+				chat.String(): "João Santos",
+			},
+		}
+
+		payload, ok := watchdogEventPayload(&events.ClearChat{
+			JID: chat, Timestamp: when, FromFullSync: false, DeleteMedia: true,
+		}, mock)
+		if !ok || payload["type"] != "ChatClear" {
+			t.Fatalf("unexpected payload: %#v", payload)
+		}
+		event := payload["event"].(map[string]interface{})
+		if event["fromFullSync"] != false {
+			t.Fatalf("expected fromFullSync false, got: %#v", event["fromFullSync"])
+		}
+		if event["deleteMedia"] != true {
+			t.Fatalf("expected deleteMedia true, got: %#v", event["deleteMedia"])
+		}
+		if event["phoneNumber"] != "5511999999999" {
+			t.Fatalf("expected phoneNumber '5511999999999', got: %#v", event["phoneNumber"])
+		}
+		if event["pushName"] != "João Santos" {
+			t.Fatalf("expected pushName 'João Santos', got: %#v", event["pushName"])
+		}
+	})
+
+	t.Run("clear chat with LID resolves phone number", func(t *testing.T) {
+		lidJID := mustJID(t, "262955211948064@lid")
+		resolvedJID := mustJID(t, "5511888888888@s.whatsapp.net")
+
+		mock := &mockLookup{
+			contacts: map[string]string{
+				"5511888888888@s.whatsapp.net": "Maria LID",
+			},
+			lidMap: map[string]types.JID{
+				lidJID.String(): resolvedJID,
+			},
+		}
+
+		payload, ok := watchdogEventPayload(&events.ClearChat{
+			JID: lidJID, Timestamp: when,
+		}, mock)
+		if !ok || payload["type"] != "ChatClear" {
+			t.Fatalf("unexpected payload: %#v", payload)
+		}
+		event := payload["event"].(map[string]interface{})
+		if event["phoneNumber"] != "5511888888888" {
+			t.Fatalf("expected phoneNumber '5511888888888', got: %#v", event["phoneNumber"])
+		}
+		if event["chatPhoneNumber"] != "5511888888888" {
+			t.Fatalf("expected chatPhoneNumber '5511888888888', got: %#v", event["chatPhoneNumber"])
+		}
+		if event["pushName"] != "Maria LID" {
+			t.Fatalf("expected pushName 'Maria LID', got: %#v", event["pushName"])
+		}
+	})
+
+	t.Run("delete chat with phone number and push name", func(t *testing.T) {
+		mock := &mockLookup{
+			contacts: map[string]string{
+				chat.String(): "Carlos Souza",
+			},
+		}
+
+		payload, ok := watchdogEventPayload(&events.DeleteChat{
+			JID: chat, Timestamp: when, FromFullSync: false, DeleteMedia: true,
+		}, mock)
+		if !ok || payload["type"] != "ChatDelete" {
+			t.Fatalf("unexpected payload: %#v", payload)
+		}
+		event := payload["event"].(map[string]interface{})
+		if event["deleteMedia"] != true {
+			t.Fatalf("expected deleteMedia true, got: %#v", event["deleteMedia"])
+		}
+		if event["phoneNumber"] != "5511999999999" {
+			t.Fatalf("expected phoneNumber '5511999999999', got: %#v", event["phoneNumber"])
+		}
+		if event["pushName"] != "Carlos Souza" {
+			t.Fatalf("expected pushName 'Carlos Souza', got: %#v", event["pushName"])
+		}
+	})
+
+	t.Run("mute with phone number and push name", func(t *testing.T) {
+		mock := &mockLookup{
+			contacts: map[string]string{
+				chat.String(): "Ana Silva",
+			},
+		}
+
+		muteEnd := int64(1756310400) // some future timestamp
+		payload, ok := watchdogEventPayload(&events.Mute{
+			JID: chat, Timestamp: when, FromFullSync: false,
+			Action: &waSyncAction.MuteAction{Muted: proto.Bool(true), MuteEndTimestamp: &muteEnd},
+		}, mock)
+		if !ok || payload["type"] != "ChatMute" {
+			t.Fatalf("unexpected payload: %#v", payload)
+		}
+		event := payload["event"].(map[string]interface{})
+		if event["muted"] != true {
+			t.Fatalf("expected muted true, got: %#v", event["muted"])
+		}
+		if event["muteEndTimestamp"] == "" {
+			t.Fatalf("expected muteEndTimestamp to be set, got empty")
+		}
+		if event["phoneNumber"] != "5511999999999" {
+			t.Fatalf("expected phoneNumber '5511999999999', got: %#v", event["phoneNumber"])
+		}
+		if event["pushName"] != "Ana Silva" {
+			t.Fatalf("expected pushName 'Ana Silva', got: %#v", event["pushName"])
+		}
+	})
+
+	t.Run("unmute with phone number and push name", func(t *testing.T) {
+		mock := &mockLookup{
+			contacts: map[string]string{
+				chat.String(): "Pedro Lima",
+			},
+		}
+
+		payload, ok := watchdogEventPayload(&events.Mute{
+			JID: chat, Timestamp: when, FromFullSync: false,
+			Action: &waSyncAction.MuteAction{Muted: proto.Bool(false)},
+		}, mock)
+		if !ok || payload["type"] != "ChatMute" {
+			t.Fatalf("unexpected payload: %#v", payload)
+		}
+		event := payload["event"].(map[string]interface{})
+		if event["muted"] != false {
+			t.Fatalf("expected muted false, got: %#v", event["muted"])
+		}
+		if event["muteEndTimestamp"] != "" {
+			t.Fatalf("expected muteEndTimestamp empty for unmute, got: %#v", event["muteEndTimestamp"])
+		}
+		if event["phoneNumber"] != "5511999999999" {
+			t.Fatalf("expected phoneNumber '5511999999999', got: %#v", event["phoneNumber"])
+		}
+		if event["pushName"] != "Pedro Lima" {
+			t.Fatalf("expected pushName 'Pedro Lima', got: %#v", event["pushName"])
 		}
 	})
 }
