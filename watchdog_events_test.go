@@ -27,6 +27,7 @@ func mustJID(t *testing.T, value string) types.JID {
 type mockLookup struct {
 	messages   map[string]struct{ sender, text string }
 	contacts   map[string]string
+	groupNames map[string]string // group JID string → display name
 	myPhone    string
 	myPushName string
 	lidMap     map[string]types.JID // LID string → resolved phone-number JID
@@ -71,6 +72,13 @@ func (m *mockLookup) ResolveLID(jid types.JID) types.JID {
 		}
 	}
 	return jid
+}
+
+func (m *mockLookup) LookupGroupName(jid types.JID) string {
+	if m.groupNames != nil {
+		return m.groupNames[jid.String()]
+	}
+	return ""
 }
 
 func TestWatchdogSubscriptionEventsAreSupported(t *testing.T) {
@@ -678,4 +686,126 @@ func TestWatchdogEventPayload(t *testing.T) {
 			t.Fatalf("expected pushName 'Pedro Lima', got: %#v", event["pushName"])
 		}
 	})
+}
+
+func TestGroupNameEnrichment(t *testing.T) {
+	group := mustJID(t, "1234567890@g.us")
+	when := time.Now()
+
+	groupRevoke := func(messageID string) *events.Message {
+		return &events.Message{
+			Info: types.MessageInfo{
+				MessageSource: types.MessageSource{Chat: group, Sender: group, IsFromMe: false},
+				ID:            messageID,
+				Timestamp:     when,
+			},
+			Message: &waE2E.Message{ProtocolMessage: &waE2E.ProtocolMessage{
+				Type: waE2E.ProtocolMessage_REVOKE.Enum(),
+				Key:  &waCommon.MessageKey{ID: proto.String("GROUP-ORIGINAL")},
+			}},
+		}
+	}
+
+	t.Run("delete for everyone in group carries chatPushName from LookupGroupName", func(t *testing.T) {
+		mock := &mockLookup{
+			groupNames: map[string]string{group.String(): "Projeto Alfa"},
+			messages: map[string]struct{ sender, text string }{
+				"GROUP-ORIGINAL": {sender: "5511888888888@s.whatsapp.net", text: "mensagem original do grupo"},
+			},
+		}
+
+		payload, ok := watchdogEventPayload(groupRevoke("GROUP-DELETE-1"), mock)
+		if !ok || payload["type"] != "MessageDeleted" {
+			t.Fatalf("unexpected payload: %#v", payload)
+		}
+		event := payload["event"].(map[string]interface{})
+		if event["chatJID"] != group.String() {
+			t.Fatalf("expected chatJID %q, got: %#v", group.String(), event["chatJID"])
+		}
+		if event["chatPushName"] != "Projeto Alfa" {
+			t.Fatalf("expected chatPushName 'Projeto Alfa', got: %#v", event["chatPushName"])
+		}
+		if event["chatPhoneNumber"] != "" {
+			t.Fatalf("group chats must not carry a phone number, got: %#v", event["chatPhoneNumber"])
+		}
+		if event["messageContent"] != "mensagem original do grupo" {
+			t.Fatalf("expected enriched messageContent, got: %#v", event["messageContent"])
+		}
+	})
+
+	t.Run("group without cached name keeps empty chatPushName", func(t *testing.T) {
+		payload, ok := watchdogEventPayload(groupRevoke("GROUP-DELETE-2"), &mockLookup{})
+		if !ok || payload["type"] != "MessageDeleted" {
+			t.Fatalf("unexpected payload: %#v", payload)
+		}
+		event := payload["event"].(map[string]interface{})
+		if event["chatJID"] != group.String() {
+			t.Fatalf("expected chatJID %q, got: %#v", group.String(), event["chatJID"])
+		}
+		if event["chatPushName"] != "" {
+			t.Fatalf("expected empty chatPushName for unknown group, got: %#v", event["chatPushName"])
+		}
+	})
+
+	t.Run("archive group carries group name", func(t *testing.T) {
+		payload, ok := watchdogEventPayload(&events.Archive{
+			JID: group, Timestamp: when,
+			Action: &waSyncAction.ArchiveChatAction{Archived: proto.Bool(true)},
+		}, &mockLookup{groupNames: map[string]string{group.String(): "Projeto Alfa"}})
+		if !ok || payload["type"] != "ChatArchive" {
+			t.Fatalf("unexpected payload: %#v", payload)
+		}
+		event := payload["event"].(map[string]interface{})
+		if event["chatPushName"] != "Projeto Alfa" {
+			t.Fatalf("expected chatPushName 'Projeto Alfa', got: %#v", event["chatPushName"])
+		}
+		if event["chatPhoneNumber"] != "" {
+			t.Fatalf("group chats must not carry a phone number, got: %#v", event["chatPhoneNumber"])
+		}
+	})
+}
+
+func TestResolveChatInfoGroup(t *testing.T) {
+	group := mustJID(t, "1234567890@g.us")
+	mock := &mockLookup{groupNames: map[string]string{group.String(): "Grupo Teste"}}
+
+	num, name := resolveChatInfo(group, mock)
+	if num != "" {
+		t.Fatalf("expected no phone number for group, got: %q", num)
+	}
+	if name != "Grupo Teste" {
+		t.Fatalf("expected group name 'Grupo Teste', got: %q", name)
+	}
+
+	// User chats must not go through the group-name path.
+	user := mustJID(t, "5511888888888@s.whatsapp.net")
+	num, name = resolveChatInfo(user, mock)
+	if num != "5511888888888" {
+		t.Fatalf("expected user phone number, got: %q", num)
+	}
+	if name != "" {
+		t.Fatalf("expected no group name for user chat, got: %q", name)
+	}
+}
+
+func TestGroupNameCache(t *testing.T) {
+	group := mustJID(t, "1234567890@g.us")
+
+	if got := cachedGroupName("user1", group); got != "" {
+		t.Fatalf("expected empty cache, got: %q", got)
+	}
+	cacheGroupName("user1", group, "  Projeto Alfa  ")
+	if got := cachedGroupName("user1", group); got != "Projeto Alfa" {
+		t.Fatalf("expected trimmed name 'Projeto Alfa', got: %q", got)
+	}
+	if got := cachedGroupName("user2", group); got != "" {
+		t.Fatalf("expected empty cache for another user, got: %q", got)
+	}
+	cacheGroupName("user1", group, "   ")
+	if got := cachedGroupName("user1", group); got != "Projeto Alfa" {
+		t.Fatalf("empty name must not evict a cached name, got: %q", got)
+	}
+	if got := cachedGroupName("bad user", types.JID{}); got != "" {
+		t.Fatalf("empty JID must not hit the cache, got: %q", got)
+	}
 }

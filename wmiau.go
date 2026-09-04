@@ -1058,6 +1058,9 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 				} else {
 					for _, group := range groups {
 						chatJIDs = append(chatJIDs, group.JID.String())
+						// Warm the group-name cache so watchdog events carry the
+						// group name without a live fetch in the hot path.
+						cacheGroupName(mycli.userID, group.JID, group.Name)
 					}
 				}
 
@@ -1473,6 +1476,12 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 						continue
 					}
 
+					// HistorySync carries the group name in the conversation payload;
+					// warm the cache so watchdog events resolve it without a fetch.
+					if chatJID.Server == types.GroupServer {
+						cacheGroupName(mycli.userID, chatJID, conv.GetName())
+					}
+
 					for _, msg := range conv.Messages {
 						if msg == nil || msg.Message == nil {
 							continue
@@ -1845,10 +1854,16 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 		postmap["type"] = "GroupInfo"
 		dowebhook = 1
 		log.Info().Str("jid", evt.JID.String()).Msg("Group info updated")
+		if evt.Name != nil && evt.Name.Name != "" {
+			cacheGroupName(mycli.userID, evt.JID, evt.Name.Name)
+		}
 	case *events.JoinedGroup:
 		postmap["type"] = "JoinedGroup"
 		dowebhook = 1
 		log.Info().Str("jid", evt.JID.String()).Msg("Joined group")
+		if evt.Name != "" {
+			cacheGroupName(mycli.userID, evt.JID, evt.Name)
+		}
 	case *events.Picture:
 		postmap["type"] = "Picture"
 		dowebhook = 1

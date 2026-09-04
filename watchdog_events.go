@@ -332,6 +332,12 @@ func resolveChatInfo(chatJID types.JID, lookup MessageLookup) (chatPhoneNumber, 
 		if chatPushName == "" && resolvedJID != chatJID {
 			chatPushName = lookup.LookupContact(resolvedJID.String())
 		}
+		// Groups (@g.us) never appear in the contacts store; resolve their
+		// display name from the group-name cache (warmed by history sync and
+		// group events), falling back to a live fetch on cache miss.
+		if chatPushName == "" && resolvedJID.Server == types.GroupServer {
+			chatPushName = lookup.LookupGroupName(resolvedJID)
+		}
 	}
 	return chatPhoneNumber, chatPushName
 }

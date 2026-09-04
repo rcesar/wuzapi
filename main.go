@@ -80,6 +80,8 @@ var (
 	killchannelMu    sync.Mutex
 	userinfocache    = cache.New(5*time.Minute, 10*time.Minute)
 	lastMessageCache = cache.New(24*time.Hour, 24*time.Hour)
+	// Group display names keyed by userID|groupJID, warmed by history sync and group events.
+	groupNameCache = cache.New(24*time.Hour, 24*time.Hour)
 	globalHTTPClient = newSafeHTTPClient()
 )
 

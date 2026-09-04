@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -24,6 +25,41 @@ type MessageLookup interface {
 	// ResolveLID resolves a LID JID (@lid) to the real phone-number JID (@s.whatsapp.net).
 	// Returns the original JID unchanged if it's not a LID or if resolution fails.
 	ResolveLID(jid types.JID) types.JID
+	// LookupGroupName returns the display name of a WhatsApp group, or "" if
+	// unknown or unreachable. Groups are never in the contacts store, so this
+	// serves from an in-memory cache warmed by history sync and group events,
+	// falling back to a live GetGroupInfo fetch (with timeout) on cache miss.
+	LookupGroupName(jid types.JID) string
+}
+
+// groupNameTTL controls how long a cached group name is considered fresh.
+// Group rename events (GroupInfo/JoinedGroup) update the cache immediately.
+const groupNameTTL = 24 * time.Hour
+
+// cacheGroupName stores a group display name keyed by userID|groupJID. Empty
+// names are ignored so a failed/partial sync never evicts a known name.
+func cacheGroupName(userID string, jid types.JID, name string) {
+	if userID == "" || jid.IsEmpty() {
+		return
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+	groupNameCache.Set(userID+"|"+jid.String(), name, groupNameTTL)
+}
+
+// cachedGroupName returns the cached display name for a group, or "" if absent.
+func cachedGroupName(userID string, jid types.JID) string {
+	if userID == "" || jid.IsEmpty() {
+		return ""
+	}
+	if v, ok := groupNameCache.Get(userID + "|" + jid.String()); ok {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
 }
 
 type clientMessageLookup struct {
@@ -133,6 +169,31 @@ func (l *clientMessageLookup) MyPushName() string {
 		return ""
 	}
 	return l.client.WAClient.Store.PushName
+}
+
+// LookupGroupName implements MessageLookup.LookupGroupName for the live client:
+// cache first, then a network GetGroupInfo with a 3s timeout. Only successful
+// lookups enter the cache (no negative caching).
+func (l *clientMessageLookup) LookupGroupName(jid types.JID) string {
+	if l == nil || l.client == nil || l.client.WAClient == nil || jid.Server != types.GroupServer {
+		return ""
+	}
+	if name := cachedGroupName(l.userID, jid); name != "" {
+		return name
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	info, err := l.client.WAClient.GetGroupInfo(ctx, jid)
+	if err != nil {
+		log.Debug().Err(err).Str("userID", l.userID).Str("groupJID", jid.String()).Msg("Could not fetch group info for lookup")
+		return ""
+	}
+	if info == nil || info.Name == "" {
+		return ""
+	}
+	cacheGroupName(l.userID, jid, info.Name)
+	return info.Name
 }
 
 // ResolveLID resolves a LID JID to its phone-number JID using the whatsmeow
