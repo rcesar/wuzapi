@@ -50,4 +50,4 @@ RUN chmod +x /app/wuzapi && \
     chmod -R 755 /app && \
     chown -R root:root /app
 
-ENTRYPOINT ["/app/wuzapi", "--logtype=console", "--color=true"]
+ENTRYPOINT ["/app/wuzapi", "--logtype=console", "--color=true", "--wadebug=DEBUG"]
