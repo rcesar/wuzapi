@@ -100,6 +100,18 @@ func parseAutomaticPresence(value string) (types.Presence, error) {
 	}
 }
 
+func resolveWADebug(flagValue, envValue string, flagExplicit bool) (string, error) {
+	value := envValue
+	if flagExplicit {
+		value = flagValue
+	}
+	value = strings.ToUpper(strings.TrimSpace(value))
+	if value != "" && value != "INFO" && value != "DEBUG" {
+		return "", fmt.Errorf("invalid whatsmeow log level %q: expected INFO, DEBUG, or empty", value)
+	}
+	return value, nil
+}
+
 // killchannel maps a userID to its session goroutine's kill channel. It is
 // accessed from HTTP request goroutines (Connect/Disconnect/logout/delete) and
 // from the per-session startClient goroutine, so every map operation must be
@@ -247,6 +259,17 @@ func main() {
 	}
 
 	flag.Parse()
+	waDebugExplicit := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "wadebug" {
+			waDebugExplicit = true
+		}
+	})
+	configuredWADebug, err := resolveWADebug(*waDebug, os.Getenv("WUZAPI_WA_DEBUG"), waDebugExplicit)
+	if err != nil {
+		log.Fatal().Err(err).Msg("Invalid whatsmeow logging configuration")
+	}
+	*waDebug = configuredWADebug
 	if _, err := getMediaStore(); err != nil {
 		log.Fatal().Err(err).Msg("Could not initialize media storage")
 	}
@@ -372,6 +395,11 @@ func main() {
 			Str("role", filepath.Base(os.Args[0])).
 			Logger()
 	}
+	waDebugLevel := *waDebug
+	if waDebugLevel == "" {
+		waDebugLevel = "OFF"
+	}
+	log.Info().Str("level", waDebugLevel).Msg("Whatsmeow logging configured")
 
 	// Setup timezone (after logger is configured)
 	tz := os.Getenv("TZ")
