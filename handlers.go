@@ -249,6 +249,24 @@ func (s *server) setDisconnectedState(txtid string, clearEvents bool) error {
 	return err
 }
 
+// connectionChecker is the part of whatsmeow.Client that Connect inspects.
+type connectionChecker interface{ IsConnected() bool }
+
+// alreadyConnected reports whether a Connect request must be rejected because a
+// live client is already connected. A nil checker means no client is loaded.
+func alreadyConnected(c connectionChecker) bool {
+	return c != nil && c.IsConnected()
+}
+
+// loadedConnectionChecker returns the loaded client for userID as a checker, or
+// a true nil interface when none is loaded.
+func loadedConnectionChecker(userID string) connectionChecker {
+	if client := clientManager.GetWhatsmeowClient(userID); client != nil {
+		return client
+	}
+	return nil
+}
+
 // Connects to Whatsapp Servers
 func (s *server) Connect() http.HandlerFunc {
 
@@ -283,6 +301,12 @@ func (s *server) Connect() http.HandlerFunc {
 		err := decoder.Decode(&t)
 		if err != nil {
 			s.Respond(w, r, http.StatusBadRequest, errors.New("could not decode Payload"))
+			return
+		}
+
+		if alreadyConnected(loadedConnectionChecker(txtid)) {
+			log.Warn().Str("user_id", txtid).Msg("Connect request rejected because client is already connected")
+			s.Respond(w, r, http.StatusConflict, errors.New("already connected"))
 			return
 		}
 
