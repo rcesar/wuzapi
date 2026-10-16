@@ -48,6 +48,16 @@ func (cm *ClientManager) DeleteWhatsmeowClient(userID string) {
 	delete(cm.whatsmeowClients, userID)
 }
 
+func (cm *ClientManager) DeleteWhatsmeowClientIf(userID string, expected *whatsmeow.Client) bool {
+	cm.Lock()
+	defer cm.Unlock()
+	if current := cm.whatsmeowClients[userID]; current != expected {
+		return false
+	}
+	delete(cm.whatsmeowClients, userID)
+	return true
+}
+
 func (cm *ClientManager) SetHTTPClient(userID string, client *resty.Client) {
 	cm.Lock()
 	defer cm.Unlock()
@@ -64,6 +74,16 @@ func (cm *ClientManager) DeleteHTTPClient(userID string) {
 	cm.Lock()
 	defer cm.Unlock()
 	delete(cm.httpClients, userID)
+}
+
+func (cm *ClientManager) DeleteHTTPClientIf(userID string, expected *resty.Client) bool {
+	cm.Lock()
+	defer cm.Unlock()
+	if current := cm.httpClients[userID]; current != expected {
+		return false
+	}
+	delete(cm.httpClients, userID)
+	return true
 }
 
 func (cm *ClientManager) SetMyClient(userID string, client *MyClient) {
@@ -87,6 +107,17 @@ func (cm *ClientManager) DeleteMyClient(userID string) {
 	defer cm.Unlock()
 	delete(cm.myClients, userID)
 	delete(cm.pollOptions, userID)
+}
+
+func (cm *ClientManager) DeleteMyClientIf(userID string, expected *MyClient) bool {
+	cm.Lock()
+	defer cm.Unlock()
+	if current := cm.myClients[userID]; current != expected {
+		return false
+	}
+	delete(cm.myClients, userID)
+	delete(cm.pollOptions, userID)
+	return true
 }
 
 // SetPollOptions remembers the plaintext options of a poll we just sent so

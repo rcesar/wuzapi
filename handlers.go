@@ -286,13 +286,16 @@ func (s *server) Connect() http.HandlerFunc {
 			return
 		}
 
-		if clientManager.GetWhatsmeowClient(txtid) != nil {
-			isConnected := clientManager.GetWhatsmeowClient(txtid).IsConnected()
-			if isConnected == true {
-				log.Warn().Str("user_id", txtid).Msg("Connect request rejected because client is already connected")
-				s.Respond(w, r, http.StatusConflict, errors.New("already connected"))
-				return
-			}
+		if err := stopAndWaitForSession(txtid, sessionStopTimeout); err != nil {
+			log.Warn().Err(err).Str("user_id", txtid).Msg("Connect request could not stop the previous session")
+			s.Respond(w, r, http.StatusConflict, errors.New("previous session is still stopping"))
+			return
+		}
+		session, reserved := reserveSession(txtid)
+		if !reserved {
+			log.Warn().Str("user_id", txtid).Msg("Connect request rejected because another session is starting")
+			s.Respond(w, r, http.StatusConflict, errors.New("another connection is already starting"))
+			return
 		}
 
 		// Resolve which events to subscribe. With no subscribe list, preserve the
@@ -313,9 +316,7 @@ func (s *server) Connect() http.HandlerFunc {
 		}
 
 		log.Info().Str("jid", jid).Msg("Attempt to connect")
-		kill := make(chan bool, 1)
-		setKillChannel(txtid, kill)
-		go s.startClient(txtid, jid, token, kill)
+		go s.startClient(txtid, jid, token, session)
 
 		if t.Immediate == false {
 			log.Warn().Msg("Waiting 10 seconds")
@@ -352,48 +353,40 @@ func (s *server) Disconnect() http.HandlerFunc {
 		jid := r.Context().Value("userinfo").(Values).Get("Jid")
 		token := r.Context().Value("userinfo").(Values).Get("Token")
 
-		if clientManager.GetWhatsmeowClient(txtid) == nil {
+		client := clientManager.GetWhatsmeowClient(txtid)
+		if client == nil && currentSession(txtid) == nil {
 			s.Respond(w, r, http.StatusInternalServerError, errors.New("no session"))
 			return
 		}
-		if clientManager.GetWhatsmeowClient(txtid).IsConnected() == true {
-			//if clientManager.GetWhatsmeowClient(txtid).IsLoggedIn() == true {
-			log.Info().Str("jid", jid).Msg("Disconnection successfull")
-			// Preserve event subscriptions by default; pass ?clear=true to also
-			// reset them on disconnect (issue #305).
-			clearEvents := r.URL.Query().Get("clear") == "true"
-			if err := s.setDisconnectedState(txtid, clearEvents); err != nil {
-				log.Warn().Str("txtid", txtid).Msg("Could not update users table on disconnect")
-			} else {
-				log.Info().Str("txtid", txtid).Bool("clearedEvents", clearEvents).Msg("Update DB on disconnection")
-				if clearEvents {
-					v := updateUserInfo(r.Context().Value("userinfo"), "Events", "")
-					userinfocache.Set(token, v, cache.NoExpiration)
-				}
-			}
 
-			response := map[string]interface{}{"Details": "Disconnected"}
-			responseJson, err := json.Marshal(response)
+		log.Info().Str("jid", jid).Msg("Disconnection requested")
+		// Preserve event subscriptions by default; pass ?clear=true to also
+		// reset them on disconnect (issue #305).
+		clearEvents := r.URL.Query().Get("clear") == "true"
+		if err := s.setDisconnectedState(txtid, clearEvents); err != nil {
+			log.Warn().Str("txtid", txtid).Msg("Could not update users table on disconnect")
+		} else if clearEvents {
+			v := updateUserInfo(r.Context().Value("userinfo"), "Events", "")
+			userinfocache.Set(token, v, cache.NoExpiration)
+		}
 
-			clientManager.DeleteWhatsmeowClient(txtid)
-			signalKill(txtid)
-
-			if err != nil {
-				s.Respond(w, r, http.StatusInternalServerError, err)
-			} else {
-				s.Respond(w, r, http.StatusOK, string(responseJson))
-			}
-			return
-			//} else {
-			//	log.Warn().Str("jid", jid).Msg("Ignoring disconnect as it was not connected")
-			//	s.Respond(w, r, http.StatusInternalServerError, errors.New("Cannot disconnect because it is not logged in"))
-			//	return
-			//}
-		} else {
-			log.Warn().Str("jid", jid).Msg("Ignoring disconnect as it was not connected")
-			s.Respond(w, r, http.StatusInternalServerError, errors.New("cannot disconnect because it is not logged in"))
+		if err := stopAndWaitForSession(txtid, sessionStopTimeout); err != nil {
+			s.Respond(w, r, http.StatusConflict, err)
 			return
 		}
+		if client != nil {
+			client.Disconnect()
+			clientManager.DeleteWhatsmeowClientIf(txtid, client)
+		}
+
+		response := map[string]interface{}{"Details": "Disconnected"}
+		responseJson, err := json.Marshal(response)
+		if err != nil {
+			s.Respond(w, r, http.StatusInternalServerError, err)
+		} else {
+			s.Respond(w, r, http.StatusOK, string(responseJson))
+		}
+		return
 	}
 }
 
@@ -677,17 +670,15 @@ func (s *server) Logout() http.HandlerFunc {
 			s.Respond(w, r, http.StatusInternalServerError, errors.New("no session"))
 			return
 		} else {
-			if clientManager.GetWhatsmeowClient(txtid).IsLoggedIn() == true &&
-				clientManager.GetWhatsmeowClient(txtid).IsConnected() == true {
-				err := clientManager.GetWhatsmeowClient(txtid).Logout(context.Background())
+			client := clientManager.GetWhatsmeowClient(txtid)
+			if client.IsLoggedIn() && client.IsConnected() {
+				err := client.Logout(context.Background())
 				if err != nil {
 					log.Error().Str("jid", jid).Msg("Could not perform logout")
 					s.Respond(w, r, http.StatusInternalServerError, errors.New("could not perform logout"))
 					return
 				} else {
 					log.Info().Str("jid", jid).Msg("Logged out")
-					clientManager.DeleteWhatsmeowClient(txtid)
-					signalKill(txtid)
 				}
 			} else {
 				if clientManager.GetWhatsmeowClient(txtid).IsConnected() == true {
@@ -700,6 +691,11 @@ func (s *server) Logout() http.HandlerFunc {
 					return
 				}
 			}
+			if err := stopAndWaitForSession(txtid, sessionStopTimeout); err != nil {
+				s.Respond(w, r, http.StatusConflict, err)
+				return
+			}
+			clientManager.DeleteWhatsmeowClientIf(txtid, client)
 		}
 
 		response := map[string]interface{}{"Details": "Logged out"}
@@ -2703,9 +2699,9 @@ func (s *server) SetStatusMessage() http.HandlerFunc {
 			return
 		}
 
-		msg := proto.String(t.Body)
+		status := types.SetStatusInput{Text: proto.String(t.Body)}
 
-		err = clientManager.GetWhatsmeowClient(txtid).SetStatusMessage(context.Background(), types.SetStatusInput{Text: msg})
+		err = clientManager.GetWhatsmeowClient(txtid).SetStatusMessage(context.Background(), status)
 		if err != nil {
 			s.Respond(w, r, http.StatusInternalServerError, errors.New(fmt.Sprintf("error sending status message: %v", err)))
 			return
@@ -6386,6 +6382,16 @@ func (s *server) DeleteUserComplete() http.HandlerFunc {
 			log.Info().Str("id", id).Msg("Disconnecting from WhatsApp")
 			client.Disconnect()
 		}
+		if err := stopAndWaitForSession(id, sessionStopTimeout); err != nil {
+			log.Warn().Err(err).Str("id", id).Msg("Session did not stop before user deletion")
+			s.respondWithJSON(w, http.StatusConflict, map[string]interface{}{
+				"code":    http.StatusConflict,
+				"error":   "session is still stopping",
+				"success": false,
+				"details": err.Error(),
+			})
+			return
+		}
 
 		// 2. Query S3 config before deleting the user
 		var s3Enabled bool
@@ -6408,7 +6414,9 @@ func (s *server) DeleteUserComplete() http.HandlerFunc {
 		}
 
 		// 4. Cleanup from memory
-		clientManager.DeleteWhatsmeowClient(id)
+		if client := clientManager.GetWhatsmeowClient(id); client != nil {
+			clientManager.DeleteWhatsmeowClientIf(id, client)
+		}
 		clientManager.DeleteMyClient(id)
 		clientManager.DeleteHTTPClient(id)
 		userinfocache.Delete(token)

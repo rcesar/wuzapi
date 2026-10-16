@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -44,6 +45,9 @@ type MyClient struct {
 	token          string
 	db             *sqlx.DB
 	s              *server
+	session        *sessionControl
+	lastConnected  atomic.Int64
+	lastKeepAlive  atomic.Int64
 	regularLowSync atomic.Bool
 }
 
@@ -392,9 +396,12 @@ func (s *server) connectOnStartup() {
 			}
 			eventstring := strings.Join(subscribedEvents, ",")
 			log.Info().Str("events", eventstring).Str("jid", jid).Msg("Attempt to connect")
-			kill := make(chan bool, 1)
-			setKillChannel(txtid, kill)
-			go s.startClient(txtid, jid, token, kill)
+			session, reserved := reserveSession(txtid)
+			if !reserved {
+				log.Warn().Str("userID", txtid).Msg("Skipping startup connection because a session is already running")
+				continue
+			}
+			go s.startClient(txtid, jid, token, session)
 
 			// Initialize S3 client if configured
 			go func(userID string) {
@@ -609,7 +616,66 @@ func getPlatformTypeEnum(platformType string) *waCompanionReg.DeviceProps_Platfo
 	}
 }
 
-func (s *server) startClient(userID string, textjid string, token string, kill chan bool) {
+type clientAttemptResult int
+
+const (
+	clientAttemptStopped clientAttemptResult = iota
+	clientAttemptFailed
+	clientAttemptRestart
+)
+
+func (s *server) startClient(userID string, textjid string, token string, session *sessionControl) {
+	defer releaseSession(session)
+	select {
+	case <-session.stop:
+		return
+	default:
+	}
+
+	lease, err := acquireSessionLease(context.Background(), s.db, userID)
+	if err != nil {
+		if errors.Is(err, errSessionAlreadyOwned) {
+			log.Warn().Str("userID", userID).Msg("Session is already owned by another WuzAPI process")
+		} else {
+			log.Error().Err(err).Str("userID", userID).Msg("Failed to acquire session ownership")
+		}
+		return
+	}
+	defer lease.release(context.Background())
+
+	for replacements := 0; ; {
+		result := s.startClientAttempt(userID, textjid, token, session)
+		if result != clientAttemptRestart {
+			return
+		}
+
+		replacements++
+		if replacements > streamReplacementMaxRetries {
+			log.Error().
+				Str("userID", userID).
+				Int("attempts", replacements).
+				Msg("Session replacement limit reached after repeated StreamReplaced events")
+			return
+		}
+
+		backoff := streamReplacementBaseBackoff * time.Duration(1<<uint(replacements-1))
+		if backoff > time.Minute {
+			backoff = time.Minute
+		}
+		jitter := time.Duration(rand.Int63n(int64(backoff/2) + 1))
+		backoff += jitter
+		log.Warn().
+			Str("userID", userID).
+			Int("attempt", replacements).
+			Dur("backoff", backoff).
+			Msg("Waiting before recreating replaced WhatsApp session")
+		if waitForStopOrDuration(session, backoff) {
+			return
+		}
+	}
+}
+
+func (s *server) startClientAttempt(userID string, textjid string, token string, session *sessionControl) clientAttemptResult {
 	log.Info().Str("userid", userID).Str("jid", textjid).Msg("Starting websocket connection to Whatsapp")
 
 	// Connection retry constants
@@ -630,28 +696,51 @@ func (s *server) startClient(userID string, textjid string, token string, kill c
 	} else {
 		client = whatsmeow.NewClient(deviceStore, nil)
 	}
+	client.InitialAutoReconnect = true
+
+	var webhookClient *resty.Client
+	var livenessCancel context.CancelFunc
+	var mycli MyClient
+	defer func() {
+		if livenessCancel != nil {
+			livenessCancel()
+		}
+		if client != nil {
+			client.Disconnect()
+		}
+		clientManager.DeleteWhatsmeowClientIf(userID, client)
+		clientManager.DeleteMyClientIf(userID, &mycli)
+		clientManager.DeleteHTTPClientIf(userID, webhookClient)
+		if _, dbErr := s.db.Exec(`UPDATE users SET qrcode='', connected=0 WHERE id=$1`, userID); dbErr != nil {
+			log.Error().Err(dbErr).Str("userID", userID).Msg("Failed to mark session disconnected during client cleanup")
+		}
+	}()
 
 	// Now we can use the client with the manager
 	clientManager.SetWhatsmeowClient(userID, client)
 
 	s.configureHistorySyncClient(client, userID)
 
-	mycli := MyClient{
+	mycli = MyClient{
 		WAClient:       client,
 		eventHandlerID: 1,
 		userID:         userID,
 		token:          token,
 		db:             s.db,
 		s:              s,
+		session:        session,
 	}
 	mycli.regularLowSync.Store(true)
 	mycli.eventHandlerID = mycli.WAClient.AddEventHandler(mycli.myEventHandler)
 
 	// Store the MyClient in clientManager
 	clientManager.SetMyClient(userID, &mycli)
+	livenessCtx, cancelLiveness := context.WithCancel(context.Background())
+	livenessCancel = cancelLiveness
+	go mycli.startLivenessWatchdog(livenessCtx)
 
 	// Webhook HTTP client for outgoing webhook deliveries.
-	webhookClient := resty.New()
+	webhookClient = resty.New()
 	webhookClient.SetRedirectPolicy(resty.FlexibleRedirectPolicy(15))
 	if *waDebug == "DEBUG" {
 		webhookClient.SetDebug(true)
@@ -716,18 +805,29 @@ func (s *server) startClient(userID string, textjid string, token string, kill c
 			// This error means that we're already logged in, so ignore it.
 			if !errors.Is(err, whatsmeow.ErrQRStoreContainsID) {
 				log.Error().Err(err).Msg("Failed to get QR channel")
-				return
+				return clientAttemptFailed
 			}
 		} else {
 			err = client.Connect() // Must connect to generate QR code
 			if err != nil {
 				log.Error().Err(err).Msg("Failed to connect client")
-				return
+				return clientAttemptFailed
 			}
 
 			myuserinfo, found := userinfocache.Get(token)
 
-			for evt := range qrChan {
+		qrEvents:
+			for {
+				var evt whatsmeow.QRChannelItem
+				var ok bool
+				select {
+				case <-session.stop:
+					return clientAttemptStopped
+				case evt, ok = <-qrChan:
+					if !ok {
+						break qrEvents
+					}
+				}
 				if evt.Event == "code" {
 					// Display QR code in terminal (useful for testing/developing)
 					// Skip in stdio mode to avoid breaking JSON-RPC
@@ -777,10 +877,7 @@ func (s *server) startClient(userID string, textjid string, token string, kill c
 						}
 					}
 					log.Warn().Msg("QR timeout killing channel")
-					clientManager.DeleteWhatsmeowClient(userID)
-					clientManager.DeleteMyClient(userID)
-					clientManager.DeleteHTTPClient(userID)
-					signalKill(userID)
+					return clientAttemptStopped
 				} else if evt.Event == "success" {
 					log.Info().Msg("QR pairing ok!")
 					// Clear QR code after pairing
@@ -860,7 +957,9 @@ func (s *server) startClient(userID string, textjid string, token string, kill c
 					Int("max_retries", maxConnectionRetries).
 					Dur("wait_time", waitTime).
 					Msg("Retrying connection after delay")
-				time.Sleep(waitTime)
+				if waitForStopOrDuration(session, waitTime) {
+					return clientAttemptStopped
+				}
 			}
 
 			err = client.Connect()
@@ -886,9 +985,9 @@ func (s *server) startClient(userID string, textjid string, token string, kill c
 				Int("attempts", maxConnectionRetries).
 				Msg("Failed to connect to WhatsApp after all retry attempts")
 
-			clientManager.DeleteWhatsmeowClient(userID)
-			clientManager.DeleteMyClient(userID)
-			clientManager.DeleteHTTPClient(userID)
+			clientManager.DeleteWhatsmeowClientIf(userID, client)
+			clientManager.DeleteMyClientIf(userID, &mycli)
+			clientManager.DeleteHTTPClientIf(userID, webhookClient)
 
 			sqlStmt := `UPDATE users SET qrcode='', connected=0 WHERE id=$1`
 			_, dbErr := s.db.Exec(sqlStmt, userID)
@@ -905,32 +1004,50 @@ func (s *server) startClient(userID string, textjid string, token string, kill c
 			postmap["reason"] = "Failed to connect after retry attempts"
 			sendEventWithWebHook(&mycli, postmap, "")
 
-			return
+			return clientAttemptFailed
 		}
 	}
 
-	// Keep the session goroutine alive until a kill signal arrives. Block on the
-	// channel (passed in directly, so this goroutine always owns its own channel
-	// even if a reconnect replaces the map entry) instead of polling — this parks
-	// the goroutine with zero CPU and no per-second mutex access.
-	<-kill
-	log.Info().Str("userid", userID).Msg("Received kill signal")
-	client.Disconnect()
-	clientManager.DeleteWhatsmeowClient(userID)
-	clientManager.DeleteMyClient(userID)
-	clientManager.DeleteHTTPClient(userID)
-	if _, err := s.db.Exec(`UPDATE users SET qrcode='', connected=0 WHERE id=$1`, userID); err != nil {
-		log.Error().Err(err).Msg("failed to mark user disconnected on kill")
+	select {
+	case <-session.stop:
+		log.Info().Str("userid", userID).Uint64("generation", session.generation).Msg("Received session stop signal")
+		return clientAttemptStopped
+	case reason := <-session.restart:
+		log.Warn().
+			Str("userid", userID).
+			Str("reason", reason).
+			Uint64("generation", session.generation).
+			Msg("Client attempt requested a session replacement")
+		return clientAttemptRestart
 	}
-	deleteKillChannel(userID, kill)
 }
 
 func (mycli *MyClient) sendAutomaticPresence() {
-	err := mycli.WAClient.SendPresence(context.Background(), automaticPresence)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err := mycli.WAClient.SendPresence(ctx, automaticPresence)
 	if err != nil {
-		log.Warn().Err(err).Str("presence", string(automaticPresence)).Msg("Failed to send automatic presence")
+		log.Warn().Err(err).Str("userID", mycli.userID).Str("presence", string(automaticPresence)).Msg("Failed to send automatic presence")
 	} else {
-		log.Info().Str("presence", string(automaticPresence)).Msg("Set automatic presence")
+		log.Info().Str("userID", mycli.userID).Str("presence", string(automaticPresence)).Msg("Set automatic presence")
+	}
+}
+
+// scheduleSessionReplacement records the loss of the live connection and lets
+// the owning startClient loop recreate the client after its bounded backoff.
+// The device store is deliberately left untouched here; whatsmeow owns store
+// deletion for real logout and device removal conditions.
+func (mycli *MyClient) scheduleSessionReplacement(reason string) {
+	if mycli == nil {
+		return
+	}
+	if mycli.db != nil {
+		if _, err := mycli.db.Exec(`UPDATE users SET connected=0 WHERE id=$1`, mycli.userID); err != nil {
+			log.Error().Err(err).Str("userID", mycli.userID).Msg("Failed to mark session disconnected before replacement")
+		}
+	}
+	if mycli.session != nil {
+		mycli.session.requestRestart(reason)
 	}
 }
 
@@ -956,6 +1073,8 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			mycli.sendAutomaticPresence()
 		}
 	case *events.Connected, *events.PushNameSetting:
+		mycli.lastConnected.Store(time.Now().UnixNano())
+		mycli.lastKeepAlive.Store(time.Now().UnixNano())
 		postmap["type"] = "Connected"
 		dowebhook = 1
 		if len(mycli.WAClient.Store.PushName) == 0 {
@@ -1092,8 +1211,13 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			}()
 		}
 	case *events.StreamReplaced:
-		log.Info().Msg("Received StreamReplaced event")
-		return
+		postmap["type"] = "StreamReplaced"
+		dowebhook = 1
+		log.Warn().
+			Str("userID", mycli.userID).
+			Uint64("generation", sessionGeneration(mycli.session)).
+			Msg("Received StreamReplaced event; scheduling session replacement")
+		mycli.scheduleSessionReplacement("stream_replaced")
 	case *events.Message:
 
 		var s3Config struct {
@@ -1797,7 +1921,8 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 	case *events.ConnectFailure:
 		postmap["type"] = "ConnectFailure"
 		dowebhook = 1
-		log.Error().Str("reason", fmt.Sprintf("%+v", evt)).Msg("Failed to connect to Whatsapp")
+		log.Error().Str("userID", mycli.userID).Str("reason", fmt.Sprintf("%+v", evt)).Msg("Failed to connect to Whatsapp")
+		mycli.scheduleSessionReplacement("connect_failure")
 	case *events.UndecryptableMessage:
 		postmap["type"] = "UndecryptableMessage"
 		dowebhook = 1
@@ -1890,23 +2015,34 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 	case *events.KeepAliveRestored:
 		postmap["type"] = "KeepAliveRestored"
 		dowebhook = 1
+		mycli.lastKeepAlive.Store(time.Now().UnixNano())
 		log.Info().Msg("Keep alive restored")
 	case *events.KeepAliveTimeout:
 		postmap["type"] = "KeepAliveTimeout"
 		dowebhook = 1
-		log.Warn().Msg("Keep alive timeout")
+		log.Warn().Str("userID", mycli.userID).Uint64("generation", sessionGeneration(mycli.session)).Int("errorCount", evt.ErrorCount).Time("lastSuccess", evt.LastSuccess).Msg("Keep alive timeout")
+		if evt.ErrorCount >= 3 {
+			mycli.scheduleSessionReplacement("keepalive_timeout")
+		}
 	case *events.ClientOutdated:
 		postmap["type"] = "ClientOutdated"
 		dowebhook = 1
-		log.Warn().Msg("Client outdated")
+		log.Warn().Str("userID", mycli.userID).Uint64("generation", sessionGeneration(mycli.session)).Msg("Client outdated; scheduling session replacement")
+		mycli.scheduleSessionReplacement("client_outdated")
 	case *events.TemporaryBan:
 		postmap["type"] = "TemporaryBan"
 		dowebhook = 1
-		log.Info().Msg("Temporary ban")
+		log.Warn().Str("userID", mycli.userID).Uint64("generation", sessionGeneration(mycli.session)).Msg("Temporary ban; scheduling session replacement")
+		mycli.scheduleSessionReplacement("temporary_ban")
 	case *events.StreamError:
 		postmap["type"] = "StreamError"
 		dowebhook = 1
-		log.Error().Str("code", evt.Code).Msg("Stream error")
+		log.Error().
+			Str("userID", mycli.userID).
+			Uint64("generation", sessionGeneration(mycli.session)).
+			Str("code", evt.Code).
+			Msg("Unknown stream error; scheduling session replacement")
+		mycli.scheduleSessionReplacement("stream_error")
 	case *events.PairError:
 		postmap["type"] = "PairError"
 		dowebhook = 1
@@ -1972,6 +2108,16 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 		postmap["continuation"] = evt.Continuation
 		dowebhook = 1
 		log.Warn().Err(evt.Error).Bool("continuation", evt.Continuation).Msg("Passkey pairing error")
+	case events.PermanentDisconnect:
+		postmap["type"] = "PermanentDisconnect"
+		postmap["reason"] = evt.PermanentDisconnectDescription()
+		dowebhook = 1
+		log.Warn().
+			Str("userID", mycli.userID).
+			Uint64("generation", sessionGeneration(mycli.session)).
+			Str("reason", evt.PermanentDisconnectDescription()).
+			Msg("Permanent disconnect; scheduling session replacement")
+		mycli.scheduleSessionReplacement("permanent_disconnect:" + evt.PermanentDisconnectDescription())
 	default:
 		log.Warn().Str("event", fmt.Sprintf("%+v", evt)).Msg("Unhandled event")
 	}

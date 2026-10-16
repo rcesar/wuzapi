@@ -81,7 +81,7 @@ var (
 	userinfocache    = cache.New(5*time.Minute, 10*time.Minute)
 	lastMessageCache = cache.New(24*time.Hour, 24*time.Hour)
 	// Group display names keyed by userID|groupJID, warmed by history sync and group events.
-	groupNameCache = cache.New(24*time.Hour, 24*time.Hour)
+	groupNameCache   = cache.New(24*time.Hour, 24*time.Hour)
 	globalHTTPClient = newSafeHTTPClient()
 )
 
@@ -112,12 +112,9 @@ func resolveWADebug(flagValue, envValue string, flagExplicit bool) (string, erro
 	return value, nil
 }
 
-// killchannel maps a userID to its session goroutine's kill channel. It is
-// accessed from HTTP request goroutines (Connect/Disconnect/logout/delete) and
-// from the per-session startClient goroutine, so every map operation must be
-// serialized through killchannelMu. The helpers below lock only around the map
-// access itself — never while sending on or receiving from a channel — so a
-// slow or absent receiver can never block another session.
+// killchannel is retained for the small compatibility surface used by the
+// kill-channel tests. Runtime sessions are coordinated by sessionRegistry in
+// session_lifecycle.go so callers can wait for a complete shutdown.
 func setKillChannel(userID string, ch chan bool) {
 	killchannelMu.Lock()
 	killchannel[userID] = ch
@@ -149,6 +146,11 @@ func deleteKillChannel(userID string, ch chan bool) {
 // if one is registered. The channel is buffered (cap 1) so the send never
 // blocks; the default guards a full buffer or a missing entry.
 func signalKill(userID string) {
+	if sc := currentSession(userID); sc != nil {
+		sc.requestStop()
+		return
+	}
+
 	ch, ok := getKillChannel(userID)
 	if !ok {
 		log.Debug().Str("userID", userID).Msg("signalKill: no kill channel registered (already cleaned up?)")
