@@ -48,6 +48,7 @@ type MyClient struct {
 	session        *sessionControl
 	lastConnected  atomic.Int64
 	lastKeepAlive  atomic.Int64
+	health         sessionHealth
 	regularLowSync atomic.Bool
 }
 
@@ -1041,6 +1042,7 @@ func (mycli *MyClient) scheduleSessionReplacement(reason string) {
 	if mycli == nil {
 		return
 	}
+	mycli.health.recordDisconnect(reason)
 	if mycli.db != nil {
 		if _, err := mycli.db.Exec(`UPDATE users SET connected=0 WHERE id=$1`, mycli.userID); err != nil {
 			log.Error().Err(err).Str("userID", mycli.userID).Msg("Failed to mark session disconnected before replacement")
@@ -1052,6 +1054,7 @@ func (mycli *MyClient) scheduleSessionReplacement(reason string) {
 }
 
 func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
+	mycli.recordHealth(rawEvt)
 	txtid := mycli.userID
 	postmap := make(map[string]interface{})
 	postmap["event"] = rawEvt

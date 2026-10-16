@@ -5783,6 +5783,7 @@ func (s *server) ListUsers() http.HandlerFunc {
 				"events":               user.Events,
 				"history":              user.History.Int64,
 				"days_to_sync_history": user.DaysToSyncHistory,
+				"health":               healthMap(clientManager.GetMyClient(user.Id)),
 			}
 			// Add proxy_config
 			proxyURL := user.ProxyURL.String
