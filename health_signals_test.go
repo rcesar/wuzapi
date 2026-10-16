@@ -4,44 +4,82 @@ import (
 	"testing"
 	"time"
 
+	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waSyncAction"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	"google.golang.org/protobuf/proto"
 )
 
-func TestIsPhoneOriginated(t *testing.T) {
+func TestPhoneActivityTime(t *testing.T) {
 	const own = "5511999999999"
+	const ownLID = "123456789"
+	owns := []string{own, ownLID}
+	now := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-3 * time.Hour)
 	third := types.JID{User: "5511888888888", Server: types.DefaultUserServer}
 	phone := types.JID{User: own, Server: types.DefaultUserServer}
+	lid := types.JID{User: ownLID, Server: types.HiddenUserServer}
 	companion := types.JID{User: own, Device: 3, Server: types.DefaultUserServer}
 
-	msg := func(sender types.JID, fromMe bool) *events.Message {
-		return &events.Message{Info: types.MessageInfo{MessageSource: types.MessageSource{Sender: sender, IsFromMe: fromMe}}, Message: &waE2E.Message{}}
+	msg := func(sender types.JID, fromMe bool, ts time.Time) *events.Message {
+		return &events.Message{Info: types.MessageInfo{MessageSource: types.MessageSource{Sender: sender, IsFromMe: fromMe}, Timestamp: ts}, Message: &waE2E.Message{}}
 	}
+	rcpt := func(sender types.JID, ts time.Time) *events.Receipt {
+		return &events.Receipt{MessageSource: types.MessageSource{Sender: sender}, Timestamp: ts}
+	}
+	lockState := &events.AppState{Index: []string{appstate.IndexLock, "1@s.whatsapp.net"}, SyncActionValue: &waSyncAction.SyncActionValue{
+		Timestamp:      proto.Int64(old.UnixMilli()),
+		LockChatAction: &waSyncAction.LockChatAction{Locked: proto.Bool(true)},
+	}}
 	tests := []struct {
-		name string
-		evt  interface{}
-		want bool
+		name        string
+		evt         interface{}
+		initialSync bool
+		want        bool
+		wantTime    time.Time
 	}{
-		{"own message device 0", msg(phone, true), true},
-		{"own message from companion", msg(companion, true), false},
-		{"incoming third-party message", msg(third, false), false},
-		{"own receipt device 0", &events.Receipt{MessageSource: types.MessageSource{Sender: phone}}, true},
-		{"own receipt companion", &events.Receipt{MessageSource: types.MessageSource{Sender: companion}}, false},
-		{"third-party receipt", &events.Receipt{MessageSource: types.MessageSource{Sender: third}}, false},
-		{"archive app state", &events.Archive{}, true},
-		{"mute app state", &events.Mute{}, true},
-		{"connected event", &events.Connected{}, false},
+		{"own message device 0 uses event time", msg(phone, true, old), false, true, old},
+		{"own message zero timestamp falls back to now", msg(phone, true, time.Time{}), false, true, now},
+		{"future timestamp clamped", msg(phone, true, now.Add(time.Hour)), false, true, now},
+		{"own message from companion", msg(companion, true, now), false, false, time.Time{}},
+		{"incoming third-party message", msg(third, false, now), false, false, time.Time{}},
+		{"own receipt device 0", rcpt(phone, old), false, true, old},
+		{"own LID receipt device 0", rcpt(lid, old), false, true, old},
+		{"own receipt companion", rcpt(companion, now), false, false, time.Time{}},
+		{"third-party receipt", rcpt(third, now), false, false, time.Time{}},
+		{"archive", &events.Archive{Timestamp: old}, false, true, old},
+		{"full-sync archive", &events.Archive{Timestamp: old, FromFullSync: true}, false, false, time.Time{}},
+		{"full-sync mute", &events.Mute{FromFullSync: true}, false, false, time.Time{}},
+		{"mute", &events.Mute{Timestamp: old}, false, true, old},
+		{"lock app state", lockState, false, true, old},
+		{"app state during initial sync", lockState, true, false, time.Time{}},
+		{"connected event", &events.Connected{}, false, false, time.Time{}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isPhoneOriginated(tt.evt, own); got != tt.want {
-				t.Fatalf("got %v want %v", got, tt.want)
+			got, ok := phoneActivityTime(tt.evt, owns, tt.initialSync, now)
+			if ok != tt.want || (ok && !got.Equal(tt.wantTime)) {
+				t.Fatalf("got (%v,%v) want (%v,%v)", got, ok, tt.wantTime, tt.want)
 			}
 		})
 	}
-	if isPhoneOriginated(&events.Receipt{MessageSource: types.MessageSource{Sender: types.JID{}}}, "") {
+	if _, ok := phoneActivityTime(rcpt(types.JID{}, now), []string{""}, false, now); ok {
 		t.Fatal("empty own user must not match")
+	}
+}
+
+func TestRecordHealthPhoneActivityMonotonic(t *testing.T) {
+	c := &MyClient{}
+	recent := time.Now().Add(-time.Minute)
+	c.recordHealth(&events.Archive{Timestamp: recent})
+	if got := c.health.lastPhoneActivityAt.Load(); got != recent.UnixNano() {
+		t.Fatalf("got %d want %d", got, recent.UnixNano())
+	}
+	c.recordHealth(&events.Archive{Timestamp: recent.Add(-time.Hour)}) // offline replay
+	if got := c.health.lastPhoneActivityAt.Load(); got != recent.UnixNano() {
+		t.Fatalf("moved backwards: %d", got)
 	}
 }
 

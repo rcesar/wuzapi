@@ -4,6 +4,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 )
 
@@ -23,22 +24,91 @@ func (h *sessionHealth) recordDisconnect(reason string) {
 	h.lastDisconnectAt.Store(time.Now().UnixNano())
 }
 
-// isPhoneOriginated reports whether evt was produced by the account's primary
-// device (the phone), as opposed to a companion device or a third party.
-func isPhoneOriginated(evt interface{}, ownUser string) bool {
+// phoneActivityTime reports whether evt was produced by the account's primary
+// device (the phone), as opposed to a companion device or a third party, and
+// when it happened according to the event itself. Full-sync and initial-sync
+// replays are not live activity. A zero event timestamp falls back to now.
+func phoneActivityTime(evt interface{}, ownUsers []string, initialSync bool, now time.Time) (time.Time, bool) {
+	isOwn := func(j types.JID) bool {
+		if j.Device != 0 || j.User == "" {
+			return false
+		}
+		for _, u := range ownUsers {
+			if u != "" && u == j.User {
+				return true
+			}
+		}
+		return false
+	}
+	var ts time.Time
 	switch e := evt.(type) {
 	case *events.Message:
-		return e.Info.IsFromMe && e.Info.Sender.Device == 0
+		if !e.Info.IsFromMe || e.Info.Sender.Device != 0 {
+			return time.Time{}, false
+		}
+		ts = e.Info.Timestamp
 	case *events.Receipt:
-		return ownUser != "" && e.Sender.User == ownUser && e.Sender.Device == 0
-	case *events.DeleteForMe, *events.Archive, *events.ClearChat, *events.DeleteChat,
-		*events.Mute, *events.Pin:
-		return true
+		if !isOwn(e.Sender) {
+			return time.Time{}, false
+		}
+		ts = e.Timestamp
+	case *events.DeleteForMe:
+		if e.FromFullSync {
+			return time.Time{}, false
+		}
+		ts = e.Timestamp
+	case *events.Archive:
+		if e.FromFullSync {
+			return time.Time{}, false
+		}
+		ts = e.Timestamp
+	case *events.ClearChat:
+		if e.FromFullSync {
+			return time.Time{}, false
+		}
+		ts = e.Timestamp
+	case *events.DeleteChat:
+		if e.FromFullSync {
+			return time.Time{}, false
+		}
+		ts = e.Timestamp
+	case *events.Mute:
+		if e.FromFullSync {
+			return time.Time{}, false
+		}
+		ts = e.Timestamp
+	case *events.Pin:
+		if e.FromFullSync {
+			return time.Time{}, false
+		}
+		ts = e.Timestamp
 	case *events.AppState:
-		_, ok := watchdogEventPayload(e, nil)
-		return ok
+		if initialSync {
+			return time.Time{}, false
+		}
+		if _, ok := watchdogEventPayload(e, nil); !ok {
+			return time.Time{}, false
+		}
+		if ms := e.GetTimestamp(); ms > 0 {
+			ts = time.UnixMilli(ms)
+		}
+	default:
+		return time.Time{}, false
 	}
-	return false
+	if ts.IsZero() || ts.After(now) {
+		return now, true
+	}
+	return ts, true
+}
+
+// storeMax advances v to val, never moving it backwards.
+func storeMax(v *atomic.Int64, val int64) {
+	for {
+		cur := v.Load()
+		if val <= cur || v.CompareAndSwap(cur, val) {
+			return
+		}
+	}
 }
 
 // disconnectReason maps a connection-loss event to a short reason, or "" when
@@ -69,12 +139,15 @@ func (mycli *MyClient) recordHealth(evt interface{}) {
 	now := time.Now().UnixNano()
 	mycli.health.lastEventAt.Store(now)
 
-	ownUser := ""
-	if mycli.WAClient != nil && mycli.WAClient.Store != nil && mycli.WAClient.Store.ID != nil {
-		ownUser = mycli.WAClient.Store.ID.User
+	var ownUsers []string
+	if mycli.WAClient != nil && mycli.WAClient.Store != nil {
+		if id := mycli.WAClient.Store.ID; id != nil {
+			ownUsers = append(ownUsers, id.User)
+		}
+		ownUsers = append(ownUsers, mycli.WAClient.Store.LID.User)
 	}
-	if isPhoneOriginated(evt, ownUser) {
-		mycli.health.lastPhoneActivityAt.Store(now)
+	if ts, ok := phoneActivityTime(evt, ownUsers, mycli.regularLowSync.Load(), time.Now()); ok {
+		storeMax(&mycli.health.lastPhoneActivityAt, ts.UnixNano())
 	}
 	if _, ok := evt.(*events.KeepAliveTimeout); ok {
 		mycli.health.lastKeepAliveTimeoutAt.Store(now)
