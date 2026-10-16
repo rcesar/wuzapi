@@ -1,6 +1,7 @@
 package main
 
 import (
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -8,20 +9,92 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 )
 
+const logoutReason = "logged_out"
+
 // sessionHealth keeps in-memory liveness timestamps (UnixNano, 0 = never) for
-// one session. They are polled through GET /admin/users instead of being pushed
-// over webhooks.
+// one user. It outlives individual MyClient attempts so the signals stay
+// readable while a session is restarting. They are polled through
+// GET /admin/users instead of being pushed over webhooks.
 type sessionHealth struct {
 	lastEventAt            atomic.Int64
 	lastPhoneActivityAt    atomic.Int64
+	lastConnectedAt        atomic.Int64
 	lastKeepAliveTimeoutAt atomic.Int64
-	lastDisconnectAt       atomic.Int64
-	lastDisconnectReason   atomic.Value // string
+
+	mu                   sync.Mutex
+	lastDisconnectAt     int64
+	lastDisconnectReason string
 }
 
+// recordDisconnect stores time and reason together. A logout is terminal until
+// the next Connected, so later reasons never overwrite it.
 func (h *sessionHealth) recordDisconnect(reason string) {
-	h.lastDisconnectReason.Store(reason)
-	h.lastDisconnectAt.Store(time.Now().UnixNano())
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.lastDisconnectReason == logoutReason && reason != logoutReason {
+		return
+	}
+	h.lastDisconnectReason = reason
+	h.lastDisconnectAt = time.Now().UnixNano()
+}
+
+func (h *sessionHealth) markConnected(now int64) {
+	h.lastConnectedAt.Store(now)
+	h.mu.Lock()
+	if h.lastDisconnectReason == logoutReason {
+		h.lastDisconnectReason = ""
+		h.lastDisconnectAt = 0
+	}
+	h.mu.Unlock()
+}
+
+func (h *sessionHealth) disconnect() (int64, string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.lastDisconnectAt, h.lastDisconnectReason
+}
+
+// healthRegistry holds one sessionHealth per user id for the process lifetime
+// (until the user is deleted).
+var healthRegistry = struct {
+	sync.Mutex
+	byUser map[string]*sessionHealth
+}{byUser: make(map[string]*sessionHealth)}
+
+func healthFor(userID string) *sessionHealth {
+	healthRegistry.Lock()
+	defer healthRegistry.Unlock()
+	h := healthRegistry.byUser[userID]
+	if h == nil {
+		h = &sessionHealth{}
+		healthRegistry.byUser[userID] = h
+	}
+	return h
+}
+
+func lookupHealth(userID string) *sessionHealth {
+	healthRegistry.Lock()
+	defer healthRegistry.Unlock()
+	return healthRegistry.byUser[userID]
+}
+
+func deleteHealth(userID string) {
+	healthRegistry.Lock()
+	delete(healthRegistry.byUser, userID)
+	healthRegistry.Unlock()
+}
+
+// sessionState tells a poller whether a missing connection is expected:
+// "running" (client loaded), "restarting" (session registered, no client:
+// backoff/QR/retry) or "stopped" (no session).
+func sessionState(userID string) string {
+	if clientManager.GetWhatsmeowClient(userID) != nil {
+		return "running"
+	}
+	if currentSession(userID) != nil {
+		return "restarting"
+	}
+	return "stopped"
 }
 
 // phoneActivityTime reports whether evt was produced by the account's primary
@@ -136,8 +209,12 @@ func disconnectReason(evt interface{}) string {
 // recordHealth updates the health timestamps for an incoming event. It must run
 // before any subscription filtering.
 func (mycli *MyClient) recordHealth(evt interface{}) {
+	h := mycli.health
+	if h == nil {
+		return
+	}
 	now := time.Now().UnixNano()
-	mycli.health.lastEventAt.Store(now)
+	h.lastEventAt.Store(now)
 
 	var ownUsers []string
 	if mycli.WAClient != nil && mycli.WAClient.Store != nil {
@@ -147,13 +224,16 @@ func (mycli *MyClient) recordHealth(evt interface{}) {
 		ownUsers = append(ownUsers, mycli.WAClient.Store.LID.User)
 	}
 	if ts, ok := phoneActivityTime(evt, ownUsers, mycli.regularLowSync.Load(), time.Now()); ok {
-		storeMax(&mycli.health.lastPhoneActivityAt, ts.UnixNano())
+		storeMax(&h.lastPhoneActivityAt, ts.UnixNano())
 	}
-	if _, ok := evt.(*events.KeepAliveTimeout); ok {
-		mycli.health.lastKeepAliveTimeoutAt.Store(now)
+	switch evt.(type) {
+	case *events.Connected:
+		h.markConnected(now)
+	case *events.KeepAliveTimeout:
+		h.lastKeepAliveTimeoutAt.Store(now)
 	}
 	if reason := disconnectReason(evt); reason != "" {
-		mycli.health.recordDisconnect(reason)
+		h.recordDisconnect(reason)
 	}
 }
 
@@ -164,9 +244,9 @@ func healthTime(unixNano int64) interface{} {
 	return time.Unix(0, unixNano).UTC().Format(time.RFC3339)
 }
 
-// healthMap builds the "health" block of /admin/users. A nil client (session
-// not loaded) yields all-null values.
-func healthMap(mycli *MyClient) map[string]interface{} {
+// healthMap builds the "health" block of /admin/users. A user without any
+// recorded signal yields all-null values.
+func healthMap(userID string) map[string]interface{} {
 	out := map[string]interface{}{
 		"lastEventAt":            nil,
 		"lastPhoneActivityAt":    nil,
@@ -174,17 +254,20 @@ func healthMap(mycli *MyClient) map[string]interface{} {
 		"lastKeepAliveTimeoutAt": nil,
 		"lastDisconnectAt":       nil,
 		"lastDisconnectReason":   nil,
+		"sessionState":           sessionState(userID),
 	}
-	if mycli == nil {
+	h := lookupHealth(userID)
+	if h == nil {
 		return out
 	}
-	out["lastEventAt"] = healthTime(mycli.health.lastEventAt.Load())
-	out["lastPhoneActivityAt"] = healthTime(mycli.health.lastPhoneActivityAt.Load())
-	out["lastConnectedAt"] = healthTime(mycli.lastConnected.Load())
-	out["lastKeepAliveTimeoutAt"] = healthTime(mycli.health.lastKeepAliveTimeoutAt.Load())
-	out["lastDisconnectAt"] = healthTime(mycli.health.lastDisconnectAt.Load())
-	if r, ok := mycli.health.lastDisconnectReason.Load().(string); ok && r != "" {
-		out["lastDisconnectReason"] = r
+	out["lastEventAt"] = healthTime(h.lastEventAt.Load())
+	out["lastPhoneActivityAt"] = healthTime(h.lastPhoneActivityAt.Load())
+	out["lastConnectedAt"] = healthTime(h.lastConnectedAt.Load())
+	out["lastKeepAliveTimeoutAt"] = healthTime(h.lastKeepAliveTimeoutAt.Load())
+	at, reason := h.disconnect()
+	out["lastDisconnectAt"] = healthTime(at)
+	if reason != "" {
+		out["lastDisconnectReason"] = reason
 	}
 	return out
 }

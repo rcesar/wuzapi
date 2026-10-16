@@ -18,6 +18,7 @@ const (
 	streamReplacementBaseBackoff = 2 * time.Second
 	livenessCheckInterval        = 30 * time.Second
 	livenessFailureThreshold     = 2 * time.Minute
+	streamReplacementResetAfter  = 10 * time.Minute
 )
 
 var errSessionAlreadyOwned = errors.New("session is owned by another wuzapi process")
@@ -242,4 +243,14 @@ func (lease *sessionLease) release(ctx context.Context) {
 	if err := lease.conn.Close(); err != nil {
 		log.Warn().Err(err).Msg("Failed to close session lease connection")
 	}
+}
+
+// nextReplacementCount returns the restart counter after an attempt that ran for
+// uptime. An attempt that stayed up long enough is not part of a rapid loop, so
+// the lifetime cap only applies to restarts in quick succession.
+func nextReplacementCount(count int, uptime time.Duration) int {
+	if uptime >= streamReplacementResetAfter {
+		count = 0
+	}
+	return count + 1
 }

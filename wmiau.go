@@ -48,7 +48,7 @@ type MyClient struct {
 	session        *sessionControl
 	lastConnected  atomic.Int64
 	lastKeepAlive  atomic.Int64
-	health         sessionHealth
+	health         *sessionHealth
 	regularLowSync atomic.Bool
 }
 
@@ -645,12 +645,13 @@ func (s *server) startClient(userID string, textjid string, token string, sessio
 	defer lease.release(context.Background())
 
 	for replacements := 0; ; {
+		attemptStart := time.Now()
 		result := s.startClientAttempt(userID, textjid, token, session)
 		if result != clientAttemptRestart {
 			return
 		}
 
-		replacements++
+		replacements = nextReplacementCount(replacements, time.Since(attemptStart))
 		if replacements > streamReplacementMaxRetries {
 			log.Error().
 				Str("userID", userID).
@@ -730,6 +731,7 @@ func (s *server) startClientAttempt(userID string, textjid string, token string,
 		db:             s.db,
 		s:              s,
 		session:        session,
+		health:         healthFor(userID),
 	}
 	mycli.regularLowSync.Store(true)
 	mycli.eventHandlerID = mycli.WAClient.AddEventHandler(mycli.myEventHandler)
@@ -1042,7 +1044,9 @@ func (mycli *MyClient) scheduleSessionReplacement(reason string) {
 	if mycli == nil {
 		return
 	}
-	mycli.health.recordDisconnect(reason)
+	if mycli.health != nil {
+		mycli.health.recordDisconnect(reason)
+	}
 	if mycli.db != nil {
 		if _, err := mycli.db.Exec(`UPDATE users SET connected=0 WHERE id=$1`, mycli.userID); err != nil {
 			log.Error().Err(err).Str("userID", mycli.userID).Msg("Failed to mark session disconnected before replacement")
@@ -1076,8 +1080,10 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			mycli.sendAutomaticPresence()
 		}
 	case *events.Connected, *events.PushNameSetting:
-		mycli.lastConnected.Store(time.Now().UnixNano())
-		mycli.lastKeepAlive.Store(time.Now().UnixNano())
+		if _, ok := rawEvt.(*events.Connected); ok {
+			mycli.lastConnected.Store(time.Now().UnixNano())
+			mycli.lastKeepAlive.Store(time.Now().UnixNano())
+		}
 		postmap["type"] = "Connected"
 		dowebhook = 1
 		if len(mycli.WAClient.Store.PushName) == 0 {

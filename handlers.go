@@ -5783,7 +5783,7 @@ func (s *server) ListUsers() http.HandlerFunc {
 				"events":               user.Events,
 				"history":              user.History.Int64,
 				"days_to_sync_history": user.DaysToSyncHistory,
-				"health":               healthMap(clientManager.GetMyClient(user.Id)),
+				"health":               healthMap(user.Id),
 			}
 			// Add proxy_config
 			proxyURL := user.ProxyURL.String
@@ -6297,6 +6297,7 @@ func (s *server) DeleteUser() http.HandlerFunc {
 			})
 			return
 		}
+		deleteHealth(userID)
 
 		// Check if the user was deleted
 		rowsAffected, err := result.RowsAffected()
@@ -6420,6 +6421,7 @@ func (s *server) DeleteUserComplete() http.HandlerFunc {
 		}
 		clientManager.DeleteMyClient(id)
 		clientManager.DeleteHTTPClient(id)
+		deleteHealth(id)
 		userinfocache.Delete(token)
 
 		// 5. Remove media files

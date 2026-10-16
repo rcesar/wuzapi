@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waSyncAction"
@@ -71,7 +72,7 @@ func TestPhoneActivityTime(t *testing.T) {
 }
 
 func TestRecordHealthPhoneActivityMonotonic(t *testing.T) {
-	c := &MyClient{}
+	c := &MyClient{health: &sessionHealth{}}
 	recent := time.Now().Add(-time.Minute)
 	c.recordHealth(&events.Archive{Timestamp: recent})
 	if got := c.health.lastPhoneActivityAt.Load(); got != recent.UnixNano() {
@@ -86,29 +87,29 @@ func TestRecordHealthPhoneActivityMonotonic(t *testing.T) {
 func TestHealthMap(t *testing.T) {
 	keys := []string{"lastEventAt", "lastPhoneActivityAt", "lastConnectedAt", "lastKeepAliveTimeoutAt", "lastDisconnectAt", "lastDisconnectReason"}
 
-	for name, c := range map[string]*MyClient{"nil client": nil, "zero values": {}} {
-		t.Run(name, func(t *testing.T) {
-			m := healthMap(c)
-			if len(m) != len(keys) {
-				t.Fatalf("got %d keys", len(m))
+	t.Run("unknown user is all null", func(t *testing.T) {
+		m := healthMap("health-unknown")
+		for _, k := range keys {
+			if v, ok := m[k]; !ok || v != nil {
+				t.Fatalf("%s = %v, want nil", k, v)
 			}
-			for _, k := range keys {
-				if v, ok := m[k]; !ok || v != nil {
-					t.Fatalf("%s = %v, want nil", k, v)
-				}
-			}
-		})
-	}
+		}
+		if m["sessionState"] != "stopped" {
+			t.Fatalf("sessionState = %v", m["sessionState"])
+		}
+	})
 
-	t.Run("set values", func(t *testing.T) {
-		c := &MyClient{}
+	t.Run("set values are RFC3339", func(t *testing.T) {
+		const id = "health-set"
+		defer deleteHealth(id)
+		h := healthFor(id)
 		ts := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-		c.health.lastEventAt.Store(ts.UnixNano())
-		c.health.lastPhoneActivityAt.Store(ts.UnixNano())
-		c.health.lastKeepAliveTimeoutAt.Store(ts.UnixNano())
-		c.lastConnected.Store(ts.UnixNano())
-		c.health.recordDisconnect("stream_error")
-		m := healthMap(c)
+		h.lastEventAt.Store(ts.UnixNano())
+		h.lastPhoneActivityAt.Store(ts.UnixNano())
+		h.lastKeepAliveTimeoutAt.Store(ts.UnixNano())
+		h.lastConnectedAt.Store(ts.UnixNano())
+		h.recordDisconnect("stream_error")
+		m := healthMap(id)
 		for _, k := range []string{"lastEventAt", "lastPhoneActivityAt", "lastConnectedAt", "lastKeepAliveTimeoutAt"} {
 			if m[k] != "2026-01-02T03:04:05Z" {
 				t.Fatalf("%s = %v", k, m[k])
@@ -123,26 +124,116 @@ func TestHealthMap(t *testing.T) {
 	})
 }
 
+func TestHealthSurvivesClientReplacement(t *testing.T) {
+	const id = "health-survive"
+	defer deleteHealth(id)
+	old := &MyClient{userID: id, health: healthFor(id)}
+	old.recordHealth(&events.Connected{})
+	old.scheduleSessionReplacement("keepalive_timeout")
+
+	// the attempt is cleaned up; a new one reuses the same store
+	_ = old
+	m := healthMap(id)
+	if m["lastEventAt"] == nil || m["lastConnectedAt"] == nil || m["lastDisconnectReason"] != "keepalive_timeout" {
+		t.Fatalf("health lost: %v", m)
+	}
+	if healthFor(id) != old.health {
+		t.Fatal("store must return the same health for the user")
+	}
+}
+
+func TestSessionState(t *testing.T) {
+	const id = "state-user"
+	if got := sessionState(id); got != "stopped" {
+		t.Fatalf("got %s", got)
+	}
+	session := newSessionControl(id, 1)
+	sessionRegistry.Lock()
+	sessionRegistry.current[id] = session
+	sessionRegistry.Unlock()
+	defer func() {
+		sessionRegistry.Lock()
+		delete(sessionRegistry.current, id)
+		sessionRegistry.Unlock()
+		clientManager.DeleteWhatsmeowClient(id)
+	}()
+	if got := sessionState(id); got != "restarting" {
+		t.Fatalf("got %s", got)
+	}
+	clientManager.SetWhatsmeowClient(id, &whatsmeow.Client{})
+	if got := sessionState(id); got != "running" {
+		t.Fatalf("got %s", got)
+	}
+}
+
 func TestRecordHealth(t *testing.T) {
-	c := &MyClient{}
+	c := &MyClient{health: &sessionHealth{}}
 	c.recordHealth(&events.Connected{})
-	if c.health.lastEventAt.Load() == 0 || c.health.lastPhoneActivityAt.Load() != 0 {
-		t.Fatal("any event sets lastEventAt only")
+	if c.health.lastEventAt.Load() == 0 || c.health.lastConnectedAt.Load() == 0 || c.health.lastPhoneActivityAt.Load() != 0 {
+		t.Fatal("any event sets lastEventAt; Connected sets lastConnectedAt only")
 	}
 	c.recordHealth(&events.KeepAliveTimeout{})
 	if c.health.lastKeepAliveTimeoutAt.Load() == 0 {
 		t.Fatal("keepalive timeout not recorded")
 	}
 	c.recordHealth(&events.StreamReplaced{})
-	if c.health.lastDisconnectReason.Load() != "stream_replaced" || c.health.lastDisconnectAt.Load() == 0 {
+	if at, r := c.health.disconnect(); r != "stream_replaced" || at == 0 {
 		t.Fatal("disconnect not recorded")
 	}
 }
 
-func TestScheduleSessionReplacementRecordsReason(t *testing.T) {
-	c := &MyClient{}
+func TestPushNameSettingDoesNotMoveConnected(t *testing.T) {
+	c := &MyClient{health: &sessionHealth{}}
+	c.recordHealth(&events.PushNameSetting{})
+	if c.health.lastConnectedAt.Load() != 0 {
+		t.Fatal("PushNameSetting must not set lastConnectedAt")
+	}
+}
+
+func TestLogoutIsTerminalUntilConnected(t *testing.T) {
+	c := &MyClient{health: &sessionHealth{}}
+	c.recordHealth(&events.LoggedOut{})
+	at, _ := c.health.disconnect()
 	c.scheduleSessionReplacement("keepalive_timeout")
-	if c.health.lastDisconnectReason.Load() != "keepalive_timeout" || c.health.lastDisconnectAt.Load() == 0 {
+	c.recordHealth(&events.Disconnected{})
+	if at2, r := c.health.disconnect(); r != "logged_out" || at2 != at {
+		t.Fatalf("logout overwritten: %s", r)
+	}
+	c.recordHealth(&events.Connected{})
+	if _, r := c.health.disconnect(); r != "" {
+		t.Fatalf("logout not cleared on Connected: %s", r)
+	}
+	c.scheduleSessionReplacement("keepalive_timeout")
+	if _, r := c.health.disconnect(); r != "keepalive_timeout" {
+		t.Fatal("reason should record after logout cleared")
+	}
+}
+
+func TestScheduleSessionReplacementRecordsReason(t *testing.T) {
+	c := &MyClient{health: &sessionHealth{}}
+	c.scheduleSessionReplacement("keepalive_timeout")
+	if at, r := c.health.disconnect(); r != "keepalive_timeout" || at == 0 {
 		t.Fatal("reason not recorded")
+	}
+}
+
+func TestNextReplacementCount(t *testing.T) {
+	tests := []struct {
+		name   string
+		count  int
+		uptime time.Duration
+		want   int
+	}{
+		{"rapid loop keeps counting", 3, 30 * time.Second, 4},
+		{"just under threshold", 4, streamReplacementResetAfter - time.Second, 5},
+		{"long-lived attempt resets", 5, streamReplacementResetAfter, 1},
+		{"first restart", 0, time.Second, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := nextReplacementCount(tt.count, tt.uptime); got != tt.want {
+				t.Fatalf("got %d want %d", got, tt.want)
+			}
+		})
 	}
 }
